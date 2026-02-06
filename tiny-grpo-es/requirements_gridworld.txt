@@ -1,0 +1,15 @@
+# Requirements for GridWorld ES vs PPO experiments
+# Minimal dependencies for the proof-of-life experiment
+
+# Core dependencies
+torch>=2.0.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Experiment tracking (optional, can disable in code)
+wandb>=0.15.0
+
+# For original GRPO/ES LLM experiments (optional)
+# transformers>=4.48.1
+# accelerate>=1.3.0

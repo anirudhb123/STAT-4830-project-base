@@ -1,6 +1,64 @@
-# Ignore everything in figures directory except PNGs and TEX files
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb_checkpoints/
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+local/
+results/*
+!results/.gitkeep
+*.log
+
+# Large files
+*.pkl
+*.pth
+*.ckpt
+*.h5
+
+# Data (if needed, can uncomment)
+# data/
+# *.csv
+# *.jsonl
+
+# Figures
 docs/figures/*
 !docs/figures/*.png
 !docs/figures/*.tex
-
-local/

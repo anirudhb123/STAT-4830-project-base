@@ -36,11 +36,47 @@ Each cycle produces specific deliverables:
 
 See the [Week 4 Instructions](docs/assignments/week4_deliverable_instructions.md) for detailed guidance on writing your first self-critique.
 
+## Current Status: Week 4 Deliverable Complete ✅
+
+**Project:** Evolution Strategies for Non-Differentiable RL in Sparse Reward Settings  
+**Deliverable:** Report Draft 1 + Working Implementation + Documentation
+
+See [`report.md`](report.md) for full details.
+
+**Key Results:**
+- ✅ ES implementation working on sparse reward gridworld
+- ✅ Comparison with PPO showing ES advantages (42.7% vs 38.5% success rate)
+- ✅ Full test suite passing
+- ✅ Comprehensive documentation
+
+### Quick Start
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Quick demo (~2 minutes)
+python quick_demo.py
+
+# Run tests
+python -m pytest tests/test_basic.py -v
+
+# View implementation notebook
+jupyter notebook notebooks/week4_implementation.ipynb
+
+# Run full comparison (3 trials, ~30 minutes)
+cd tiny-grpo-es
+python compare_methods.py --env simple --trials 3 --iterations 100
+```
+
+**📋 See [`WEEK4_SUMMARY.md`](WEEK4_SUMMARY.md) for complete deliverable overview**  
+**✅ See [`CHECKLIST.md`](CHECKLIST.md) for submission verification**
+
 ## Project Schedule
 
 ### Deliverables (Due Fridays)
-- Week 2 (Jan 23): Email Project Team Names to Ai, Jiahao <jiahaoai@wharton.upenn.edu>
-- Week 4 (Feb 6): Report Draft 1 + Code + Self Critique
+- Week 2 (Jan 23): Email Project Team Names to Ai, Jiahao <jiahaoai@wharton.upenn.edu> ✅
+- Week 4 (Feb 6): Report Draft 1 + Code + Self Critique ✅
 - Week 5 (Feb 13): Slides Draft 1
 - Week 6 (Feb 20): Report Draft 2 + Code + Self Critique
 - Week 7 (Feb 27): Slides Draft 2
@@ -77,17 +113,30 @@ Remember:
 ## Repository Structure
 
 ```
-your-repo/
-├── README.md                    # This file
-├── report.md                    # Your project report
-├── notebooks/                   # Jupyter notebooks
-├── src/                        # Source code
-├── tests/                      # Test files
+STAT-4830-project-base/
+├── README.md                           # Project overview & status
+├── report.md                           # Week 4 report
+├── notebooks/
+│   └── week4_implementation.ipynb      # Working implementation with tests
+├── src/                                # Core optimization code
+│   ├── __init__.py
+│   ├── model.py                        # GridWorld env & networks
+│   └── utils.py                        # ES training & evaluation
+├── tests/
+│   └── test_basic.py                   # Basic validation tests
+├── tiny-grpo-es/                       # Original experiments (archived)
+│   ├── compare_methods.py              # Full comparison script
+│   ├── train_es_gridworld.py           # ES training
+│   ├── train_ppo_gridworld.py          # PPO baseline
+│   └── ...
 └── docs/
-    ├── finding_project_ideas.md    # Guide to finding your project
-    ├── assignments/                # Assignment instructions
-    ├── llm_exploration/           # AI conversation logs
-    └── development_log.md         # Progress & decisions
+    ├── assignments/
+    │   └── week4_deliverable_instructions.md
+    ├── llm_exploration/
+    │   ├── week4_log.md                # AI conversation logs
+    │   └── session_template.md
+    ├── development_log.md              # Progress & decisions
+    └── finding_project_ideas.md
 ```
 
 ## Development Environment

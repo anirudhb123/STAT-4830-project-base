@@ -1,0 +1,17 @@
+# Week 4 Dependencies for ES GridWorld Project
+# Install with: pip install -r requirements.txt
+
+# Core dependencies
+torch>=2.0.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Development & testing
+jupyter>=1.0.0
+pytest>=7.0.0
+psutil>=5.9.0
+
+# Optional (for enhanced features)
+scipy>=1.10.0  # For statistical tests
+tqdm>=4.65.0   # For progress bars

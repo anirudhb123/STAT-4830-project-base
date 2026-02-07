@@ -192,7 +192,133 @@ repo/
 
 ---
 
-## Session 7: Report Writing (Feb 6)
+## Session 7: PPO Training Implementation (Feb 5)
+
+### Conversation with Claude
+
+**My Question:**
+> I'm ready to implement the actual PPO training loop. I already have the PolicyNetwork with `get_action_batch` and ValueNetwork from last session. What components do I need and what design decisions should I make?
+
+**Response Summary:**
+1. **RolloutBuffer:** Need a buffer class to collect trajectories before updating
+   - Stores (state, action, reward, log_prob, value, done) tuples
+   - Convert to tensors in batch for efficient training
+   - Clear after each iteration
+
+2. **GAE (Generalized Advantage Estimation):**
+   - Implement as a standalone function
+   - Walk backwards through trajectory computing TD errors
+   - Formula: `δ_t = r_t + γ * V(s_{t+1}) * (1 - done_t) - V(s_t)`
+   - Accumulate: `A_t = δ_t + γ * λ * (1 - done_t) * A_{t-1}`
+   - Returns = advantages + values
+
+3. **Training loop structure:**
+   - Collect `n_steps` of experience per iteration
+   - Compute GAE advantages and returns
+   - Normalize advantages (crucial for stability)
+   - Run multiple epochs of minibatch updates per iteration
+   - Separate optimizers for policy and value networks
+
+**Key Design Decision - Separate vs. Shared Optimizers:**
+```python
+# Separate optimizers (what I chose)
+policy_optimizer = optim.Adam(policy.parameters(), lr=3e-4)
+value_optimizer = optim.Adam(value_net.parameters(), lr=1e-3)
+```
+Claude recommended separate optimizers with different learning rates: 3e-4 for policy (conservative updates) and 1e-3 for value network (can learn faster since it's a regression target). This avoids the value loss dominating policy gradients.
+
+**My Follow-up:**
+> What about the clipped surrogate objective? I'm confused about the ratio calculation.
+
+**Response:**
+- Compute probability ratio: `ratio = exp(log_prob_new - log_prob_old)`
+- Clipped objective: `min(ratio * A, clip(ratio, 1-ε, 1+ε) * A)`
+- The clip prevents the policy from changing too much in one update
+- ε = 0.2 is standard, but 0.1-0.3 all work for simple problems
+- Also add an entropy bonus to encourage exploration (coefficient ~0.01)
+
+**What I Did:**
+- Implemented `RolloutBuffer` class in `src/ppo_training.py` with `add()`, `get()`, `clear()` methods
+- Implemented `compute_gae()` as standalone function with reverse iteration
+- Built the full `train_ppo()` function with:
+  - Rollout collection loop with `n_steps=128` per iteration
+  - GAE advantage estimation (γ=0.99, λ=0.95)
+  - Advantage normalization: `(adv - mean) / (std + 1e-8)`
+  - PPO clipped surrogate objective (ε=0.2)
+  - Entropy bonus (coefficient=0.01) for exploration
+  - Gradient clipping with `max_grad_norm=0.5`
+  - Minibatch updates (batch_size=64) over multiple epochs (n_epochs=4)
+
+**Debugging Issue:**
+Initially forgot to detach old log probabilities during rollout collection — the backward pass was trying to backprop through the old policy. Fixed by storing `log_prob` as a plain float in the buffer rather than a tensor with grad.
+
+**Failed Attempt:**
+Tried using a single optimizer for both policy and value networks with a combined loss (`policy_loss + 0.5 * value_loss + entropy`). This led to unstable training — the value loss gradients were much larger than the policy loss gradients, causing the policy to barely update. Switching to separate optimizers (as Claude recommended above) fixed this.
+
+---
+
+## Session 8: PPO Evaluation & Testing (Feb 6)
+
+### Conversation with ChatGPT
+
+**My Question:**
+> I've implemented PPO training but need to evaluate it properly. How should I evaluate a PPO policy during and after training? What metrics matter for sparse reward gridworld?
+
+**Response Summary:**
+1. **During training:**
+   - Track mean episode reward per iteration (noisy but fast feedback)
+   - Use an EMA (exponential moving average) of rewards for smoother signal
+   - Track best reward seen so far
+   - Evaluate deterministically every N iterations (separate from training)
+
+2. **Evaluation function design:**
+   - Use `deterministic=True` (argmax action instead of sampling)
+   - Run multiple episodes (10+) and average
+   - Track three metrics: mean reward, success rate, mean steps to goal
+   - Wrap in `torch.no_grad()` and set policy to `eval()` mode
+
+3. **Comparing PPO vs. ES:**
+   - Same environment, same seeds for fair comparison
+   - Compare sample efficiency (how many env steps to reach X% success)
+   - Compare final performance (success rate after same training budget)
+   - PPO should be more sample-efficient; ES may find better optima in some cases
+
+**Key Code Pattern:**
+```python
+def evaluate_policy(policy, env, n_episodes=5, max_steps=100):
+    policy.eval()
+    with torch.no_grad():
+        for _ in range(n_episodes):
+            state = env.reset()
+            while not done and steps < max_steps:
+                action, _ = policy.get_action(state, deterministic=True)
+                state, reward, done, info = env.step(action)
+            successes.append(float(info['success']))
+    policy.train()
+    return mean_reward, mean_success, mean_steps
+```
+
+**My Follow-up:**
+> My PPO runs but the success rate stays at 0% for the first ~50 iterations on the 8x8 grid. Is that normal for sparse rewards?
+
+**Response:**
+- Sparse reward = slow initial learning for gradient-based methods (PPO needs to stumble into the goal by random exploration)
+- Entropy bonus is critical — increase `entropy_coef` from 0.01 to 0.02-0.05 if exploration is too low
+- Can also try reward shaping (small negative step penalty encourages shorter paths)
+- 50 iterations with 128 steps each = 6,400 environment steps, which may not be enough for 8x8 sparse
+- Try smaller grid first (5x5) to verify correctness, then scale up
+
+**What I Did:**
+- Implemented `evaluate_policy()` in `src/ppo_training.py` with deterministic evaluation
+- Added EMA tracking and best reward tracking inside `train_ppo()`
+- Added periodic evaluation logging: `eval_every=5` iterations prints train_reward, eval_reward, eval_success, eval_steps
+- Verified PPO works on 5x5 grid (reaches ~80% success in 100 iterations)
+- On 8x8 grid, PPO is slower to start learning compared to ES but catches up around iteration 100
+- Noted that the entropy coefficient is a sensitive hyperparameter — too low and PPO gets stuck, too high and it doesn't converge
+
+---
+
+## Session 9: Report Writing (Feb 6)
 
 ### Conversation with ChatGPT
 
@@ -264,15 +390,17 @@ repo/
 
 **ChatGPT (GPT-4):**
 - Algorithm questions
-- Debugging help
+- Debugging help (ES divergence, PPO sparse reward stalling)
+- PPO evaluation strategy
 - Writing advice
-- ~15 conversations, 1-2 hours total
+- ~18 conversations, 2-3 hours total
 
 **Claude (Sonnet):**
 - Theoretical questions
+- PPO architecture & training loop design
 - Paper summaries
 - Code review
-- ~5 conversations, 30 min total
+- ~8 conversations, 1 hour total
 
 **Cursor AI:**
 - Code completion
@@ -289,9 +417,9 @@ repo/
 
 ## Impact Assessment
 
-**Time Saved:** ~7 hours total
-- Debugging: 3 hours
-- Code writing: 2 hours  
+**Time Saved:** ~9 hours total
+- Debugging: 4 hours (ES divergence + PPO optimizer issues + sparse reward tuning)
+- Code writing: 3 hours (PPO training loop, rollout buffer, evaluation)
 - Research/reading: 2 hours
 
 **Quality Improvement:**
@@ -301,8 +429,11 @@ repo/
 
 **Learning:**
 - Understood ES algorithm deeper through explanation attempts
-- Learned what components are needed for PPO (GAE, clipping) to prepare for future implementation
-- Learned about fitness shaping/standardization (wasn't in original papers I read)
+- Implemented full PPO pipeline: RolloutBuffer, GAE, clipped surrogate objective, entropy bonus
+- Learned the importance of separate optimizers for policy vs. value networks (failed attempt with combined optimizer)
+- Discovered entropy coefficient is a sensitive hyperparameter for sparse reward PPO
+- Learned about fitness shaping/standardization for ES (wasn't in original papers I read)
+- Gained practical understanding of PPO vs. ES trade-offs: PPO is more sample-efficient but slower to start in sparse reward settings
 
 **Trade-offs:**
 - Sometimes followed suggestions without fully understanding (had to revisit)

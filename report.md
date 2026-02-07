@@ -28,13 +28,16 @@ where ε_i ~ N(0, I) are Gaussian perturbations, σ is the noise scale, N is the
 | Episodes per evaluation | 5 | Reduces variance from random obstacle placement |
 | Max steps per episode | 50 | Enough for optimal ~14-step path on 8×8 grid |
 
+For the PPO baseline, we implemented a standard PPO-Clip algorithm with Generalized Advantage Estimation (GAE). Key hyperparameters include clipping $\epsilon=0.2$, GAE $\lambda=0.95$, discount $\gamma=0.99$, and an entropy coefficient of 0.01 to encourage exploration. The implementation uses separate optimizers for the policy and value networks.
+
 **Implementation strategy.** All code uses PyTorch for network definitions and NumPy for environment logic. The codebase is organized as:
 
-- `src/model.py` — `GridWorld` and `HarderGridWorld` environments, `PolicyNetwork` (state → action probabilities), and `ValueNetwork` (scaffolded for future PPO comparison)
+- `src/model.py` — `GridWorld` and `HarderGridWorld` environments, `PolicyNetwork` (state → action probabilities), and `ValueNetwork` (value function approximation)
 - `src/utils.py` — `es_gradient_estimate` (core ES loop), `train_es` (full training pipeline), `evaluate_policy`, `plot_training_curves`, and `compute_statistics`
+- `src/ppo_training.py` — `train_ppo` (PPO training loop), `RolloutBuffer`, and GAE computation
 - `src/__init__.py` — Clean package exports
 
-The `PolicyNetwork` uses orthogonal weight initialization and supports both stochastic and deterministic action selection. A `get_action_batch` method is included to support a planned PPO training loop. The `ValueNetwork` shares the same 2-layer MLP architecture and is ready for PPO's advantage estimation, though the PPO training loop itself is not yet implemented.
+The `PolicyNetwork` uses orthogonal weight initialization and supports both stochastic and deterministic action selection. A `get_action_batch` method is included to support the PPO training loop. The `ValueNetwork` shares the same 2-layer MLP architecture and is used for PPO's advantage estimation.
 
 **Validation methods.** We validate through unit tests (environment mechanics, network forward pass shapes, ES gradient shape), integration tests (full training loop execution, evaluation pipeline), and edge case tests (empty grid, dense obstacles, larger 12×12 grid).
 
@@ -55,7 +58,7 @@ The policy did not converge in 20 iterations. Gradient norms remained high, indi
 
 **Test case results.** Environment mechanics tests confirmed correct collision handling, reward assignment, and episode termination. The policy network forward pass produces valid probability distributions (correct shape, sums to 1, non-negative). The ES gradient estimator returns gradients of the correct shape. One edge case test revealed a potential bug in goal detection logic for the action mapping test, which is under investigation.
 
-**Current limitations.** The most significant limitation is that we have not yet demonstrated learning — the 20-iteration run was a quick validation, not a convergence experiment. Additionally, the `HarderGridWorld` (key-door variant) has been built but not trained on, and the PPO comparison baseline is scaffolded but not implemented.
+**Current limitations.** The most significant limitation is that we have not yet demonstrated learning — the 20-iteration run was a quick validation, not a convergence experiment. Additionally, the `HarderGridWorld` (key-door variant) has been built but not trained on. While the PPO training infrastructure is now implemented, full comparative experiments against ES have not yet been executed.
 
 **Resource usage.** Training is CPU-only and lightweight. A full 100-iteration run is estimated at ~1.1 minutes, making hyperparameter sweeps feasible on a laptop. No GPU is required for the current network size.
 
@@ -65,7 +68,7 @@ The policy did not converge in 20 iterations. Gradient norms remained high, indi
 
 1. **Run full training experiments.** Execute 100+ iteration ES training runs and verify whether the policy converges on the 8×8 grid. If not, perform a hyperparameter grid search over σ ∈ {0.01, 0.03, 0.05, 0.1}, α ∈ {0.005, 0.01, 0.05}, and N ∈ {20, 50, 100}.
 2. **Debug environment test failure.** The action mapping unit test flagged a potential issue in goal detection logic within `GridWorld.step`. This needs to be resolved to ensure environment correctness.
-3. **Implement PPO training loop.** Build `train_ppo` in `src/utils.py` using the already-scaffolded `ValueNetwork` and `get_action_batch`. This will provide a gradient-based baseline for fair comparison.
+3. **Run PPO baseline experiments.** Execute the newly implemented `train_ppo` loop to establish a gradient-based baseline. We will compare convergence speed and final success rates against ES.
 4. **Multi-trial evaluation.** Once ES converges, run 5–10 independent trials (different seeds) and report mean ± std. Use the existing `compute_statistics` and `print_comparison_table` utilities. Compute effect sizes (Cohen's d) for ES vs. random baseline.
 
 **Technical improvements:**

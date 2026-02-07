@@ -1,0 +1,301 @@
+"""
+PPO (Proximal Policy Optimization) training utilities.
+"""
+import numpy as np
+import torch
+import torch.nn.functional as F
+import torch.optim as optim
+from typing import List, Tuple
+
+
+class RolloutBuffer:
+    """Buffer for storing rollout data."""
+    
+    def __init__(self):
+        self.states = []
+        self.actions = []
+        self.rewards = []
+        self.log_probs = []
+        self.values = []
+        self.dones = []
+    
+    def add(self, state, action, reward, log_prob, value, done):
+        self.states.append(state)
+        self.actions.append(action)
+        self.rewards.append(reward)
+        self.log_probs.append(log_prob)
+        self.values.append(value)
+        self.dones.append(done)
+    
+    def get(self):
+        """Convert to tensors."""
+        return (
+            torch.FloatTensor(np.array(self.states)),
+            torch.LongTensor(self.actions),
+            torch.FloatTensor(self.rewards),
+            torch.FloatTensor(self.log_probs),
+            torch.FloatTensor(self.values),
+            torch.FloatTensor(self.dones),
+        )
+    
+    def clear(self):
+        self.states.clear()
+        self.actions.clear()
+        self.rewards.clear()
+        self.log_probs.clear()
+        self.values.clear()
+        self.dones.clear()
+    
+    def __len__(self):
+        return len(self.states)
+
+
+def compute_gae(
+    rewards: torch.Tensor,
+    values: torch.Tensor,
+    dones: torch.Tensor,
+    gamma: float = 0.99,
+    gae_lambda: float = 0.95
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute Generalized Advantage Estimation (GAE).
+    
+    Returns:
+        advantages: (T,)
+        returns: (T,)
+    """
+    T = len(rewards)
+    advantages = torch.zeros(T)
+    last_gae = 0
+    
+    for t in reversed(range(T)):
+        if t == T - 1:
+            next_value = 0.0
+        else:
+            next_value = values[t + 1]
+        
+        # TD error
+        delta = rewards[t] + gamma * next_value * (1 - dones[t]) - values[t]
+        
+        # GAE
+        last_gae = delta + gamma * gae_lambda * (1 - dones[t]) * last_gae
+        advantages[t] = last_gae
+    
+    returns = advantages + values
+    return advantages, returns
+
+
+def evaluate_policy(
+    policy,
+    env,
+    n_episodes: int = 5,
+    max_steps: int = 100
+) -> Tuple[float, float, float]:
+    """Evaluate policy."""
+    total_rewards = []
+    successes = []
+    episode_steps = []
+    
+    policy.eval()
+    with torch.no_grad():
+        for _ in range(n_episodes):
+            state = env.reset()
+            episode_reward = 0
+            steps = 0
+            done = False
+            
+            while not done and steps < max_steps:
+                action, _ = policy.get_action(state, deterministic=True)
+                state, reward, done, info = env.step(action)
+                episode_reward += reward
+                steps += 1
+            
+            total_rewards.append(episode_reward)
+            successes.append(float(info['success']))
+            episode_steps.append(steps)
+    
+    policy.train()
+    return np.mean(total_rewards), np.mean(successes), np.mean(episode_steps)
+
+
+def train_ppo(
+    policy,
+    value_net,
+    env_class,
+    env_kwargs: dict,
+    n_iterations: int = 200,
+    n_steps: int = 128,
+    n_epochs: int = 4,
+    batch_size: int = 64,
+    gamma: float = 0.99,
+    gae_lambda: float = 0.95,
+    clip_epsilon: float = 0.2,
+    lr_policy: float = 3e-4,
+    lr_value: float = 1e-3,
+    entropy_coef: float = 0.01,
+    value_coef: float = 0.5,
+    max_grad_norm: float = 0.5,
+    eval_every: int = 5,
+    log_wandb: bool = True,
+    seed: int = 42
+):
+    """
+    Train policy using PPO.
+    
+    Args:
+        policy: Policy network
+        value_net: Value network
+        env_class: Environment class
+        env_kwargs: Environment kwargs
+        n_iterations: Number of training iterations
+        n_steps: Steps to collect per iteration
+        n_epochs: Epochs per iteration
+        batch_size: Minibatch size
+        gamma: Discount factor
+        gae_lambda: GAE lambda
+        clip_epsilon: PPO clip parameter
+        lr_policy: Policy learning rate
+        lr_value: Value learning rate
+        entropy_coef: Entropy coefficient
+        value_coef: Value loss coefficient
+        max_grad_norm: Max gradient norm for clipping
+        eval_every: Evaluate every N iterations
+        log_wandb: Log to wandb
+        seed: Random seed
+    """
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    
+    device = next(policy.parameters()).device
+    
+    # Optimizers
+    policy_optimizer = optim.Adam(policy.parameters(), lr=lr_policy)
+    value_optimizer = optim.Adam(value_net.parameters(), lr=lr_value)
+    
+    # Environment
+    env = env_class(**env_kwargs)
+    
+    # Tracking
+    best_reward = -float('inf')
+    ema_reward = None
+    total_steps = 0
+    
+    for iteration in range(n_iterations):
+        # Collect rollout
+        buffer = RolloutBuffer()
+        state = env.reset()
+        episode_rewards = []
+        episode_reward = 0
+        
+        policy.eval()
+        value_net.eval()
+        
+        for step in range(n_steps):
+            # Get action and value
+            with torch.no_grad():
+                state_tensor = torch.FloatTensor(state).to(device)
+                action, log_prob = policy.get_action(state, deterministic=False)
+                value = value_net(state_tensor).item()
+            
+            # Take step
+            next_state, reward, done, info = env.step(action)
+            
+            # Store transition
+            buffer.add(state, action, reward, log_prob, value, done)
+            
+            episode_reward += reward
+            total_steps += 1
+            state = next_state
+            
+            if done:
+                episode_rewards.append(episode_reward)
+                episode_reward = 0
+                state = env.reset()
+        
+        # Convert buffer to tensors
+        states, actions, rewards, old_log_probs, values, dones = buffer.get()
+        states = states.to(device)
+        actions = actions.to(device)
+        old_log_probs = old_log_probs.to(device)
+        
+        # Compute advantages and returns
+        advantages, returns = compute_gae(rewards, values, dones, gamma, gae_lambda)
+        advantages = advantages.to(device)
+        returns = returns.to(device)
+        
+        # Normalize advantages
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        
+        # Update networks
+        policy.train()
+        value_net.train()
+        
+        for epoch in range(n_epochs):
+            # Create minibatches
+            indices = np.arange(len(buffer))
+            np.random.shuffle(indices)
+            
+            for start in range(0, len(buffer), batch_size):
+                end = start + batch_size
+                batch_indices = indices[start:end]
+                
+                # Get batch
+                batch_states = states[batch_indices]
+                batch_actions = actions[batch_indices]
+                batch_old_log_probs = old_log_probs[batch_indices]
+                batch_advantages = advantages[batch_indices]
+                batch_returns = returns[batch_indices]
+                
+                # Compute policy loss
+                log_probs, entropy = policy.get_action_batch(batch_states, batch_actions)
+                ratio = torch.exp(log_probs - batch_old_log_probs)
+                
+                # PPO clipped objective
+                surr1 = ratio * batch_advantages
+                surr2 = torch.clamp(ratio, 1 - clip_epsilon, 1 + clip_epsilon) * batch_advantages
+                policy_loss = -torch.min(surr1, surr2).mean()
+                
+                # Entropy bonus
+                entropy_loss = -entropy_coef * entropy
+                
+                # Total policy loss
+                total_policy_loss = policy_loss + entropy_loss
+                
+                # Update policy
+                policy_optimizer.zero_grad()
+                total_policy_loss.backward()
+                torch.nn.utils.clip_grad_norm_(policy.parameters(), max_grad_norm)
+                policy_optimizer.step()
+                
+                # Compute value loss
+                pred_values = value_net(batch_states)
+                value_loss = F.mse_loss(pred_values, batch_returns)
+                
+                # Update value network
+                value_optimizer.zero_grad()
+                value_loss.backward()
+                torch.nn.utils.clip_grad_norm_(value_net.parameters(), max_grad_norm)
+                value_optimizer.step()
+        
+        # Tracking
+        mean_episode_reward = np.mean(episode_rewards) if episode_rewards else 0.0
+        if ema_reward is None:
+            ema_reward = mean_episode_reward
+        else:
+            ema_reward = 0.9 * ema_reward + 0.1 * mean_episode_reward
+        
+        if mean_episode_reward > best_reward:
+            best_reward = mean_episode_reward
+        
+        # Evaluation
+        if (iteration + 1) % eval_every == 0 or iteration == 0:
+            eval_reward, eval_success, eval_steps = evaluate_policy(
+                policy, env, n_episodes=10, max_steps=env_kwargs["max_steps"]
+            )
+            
+            print(f"Iter {iteration+1}/{n_iterations}: "
+                  f"train_reward={mean_episode_reward:.3f}, "
+                  f"eval_reward={eval_reward:.3f}, eval_success={eval_success:.2f}, "
+                  f"eval_steps={eval_steps:.1f}, ema={ema_reward:.3f}, best={best_reward:.3f}")
+    
+    return policy, value_net

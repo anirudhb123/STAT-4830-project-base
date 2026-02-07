@@ -12,10 +12,10 @@
 - Reproducible setup: Fixed seeds and consistent environment settings (8×8, 8 obstacles, max 50 steps) make results easier to replicate and compare.
 
 ### Areas for Improvement
-- **Lack of Convergence:** We have not yet demonstrated that the method actually works; the current results only prove the code runs, not that it solves the problem (0% success rate).
 - **Unverified Baseline:** While the PPO training loop is described as implemented in the report, no comparative results are included, leaving the claim that "ES is a compelling alternative" theoretically supported but empirically untested.
 - **Unresolved Bugs:** The report mentions a "potential bug in goal detection logic" flagged by unit tests; proceeding with long training runs before fixing this risks invalidating all future results.
 - Training and evaluation use the same obstacle seed/config (seed=123 for both shaped training env and sparse eval env). That makes the current results less generalizable.
+- Because both methods train on shaped reward, the current experiment doesn’t yet validate improvement in accuracy, just differences in speed.
 
 ### Critical Risks/Assumptions
 We are assuming that the failure to converge is solely due to the low iteration count (20) rather than a fundamental issue with the sparse reward signal or the one-hot state encoding. There is a risk that vanilla ES without fitness shaping or curriculum learning may never find the goal on an 8x8 grid with obstacles given the sparsity of the signal.

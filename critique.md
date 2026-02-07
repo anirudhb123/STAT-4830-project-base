@@ -3,10 +3,13 @@
 ## ORIENT
 
 ### Strengths
-- **Clear Motivation:** The report effectively articulates why ES is a relevant candidate for sparse reward settings where gradient-based methods struggle, supported by a clear mathematical formulation.
-- **Honest Reporting:** The "Initial Results" section transparently admits the 0% success rate in the validation run rather than cherry-picking data, establishing a trustworthy baseline for future improvements.
-- **Code Structure:** The codebase is well-organized into modular components (`model.py`, `utils.py`, `ppo_training.py`), making it easy to extend for the planned PPO comparison without refactoring.
-- Working end-to-end comparison (now empirical, not just theoretical): The notebook actually runs a fair ES vs PPO comparison: both train on shaped rewards and are evaluated on sparse rewards only (0/+1).
+- Clear motivation + correct framing: The writeup clearly motivates ES as parameter-space optimization that can work when action-space gradients are unreliable, and the report’s mathematical framing matches the implementation.
+
+- Working end-to-end comparison (now empirical, not just theoretical): The notebook actually runs a fair ES vs PPO comparison: both train on shaped rewards and are evaluated on sparse rewards only (0/+1). In the shown run, both methods reach 100% success on the sparse evaluation environment.
+
+- Modular code + extensibility: The separation into model.py, ppo_training.py, and utilities supports controlled experiments (swapping envs, reward functions, hyperparams) without refactoring.
+
+- Reproducible setup: Fixed seeds and consistent environment settings (8×8, 8 obstacles, max 50 steps) make results easier to replicate and compare.
 
 ### Areas for Improvement
 - **Lack of Convergence:** We have not yet demonstrated that the method actually works; the current results only prove the code runs, not that it solves the problem (0% success rate).

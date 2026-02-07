@@ -61,45 +61,39 @@ Reduced sigma from 0.1 to 0.05 - fixed the divergence!
 
 ---
 
-## Session 3: PPO Implementation (Feb 2)
+## Session 3: PPO Research & Network Scaffolding (Feb 2)
 
 ### Conversation with Claude
 
 **My Question:**
-> I need to implement PPO for comparison. What are the critical components I need to get right?
+> I want to eventually compare ES with PPO. What components do I need to build into my networks now to support PPO later?
 
 **Response Summary:**
-1. **Advantage estimation:** Use GAE (Generalized Advantage Estimation)
-   - λ typically 0.95-0.99
-   - Helps with variance reduction
+1. **Value function:** Need a separate `ValueNetwork` to estimate state values
+   - Maps state → scalar value
+   - Same architecture as policy is fine for small problems
    
-2. **Clipping:** PPO clip parameter ε typically 0.1-0.3
-   - Prevents too-large policy updates
-   
-3. **Value function:** Separate network, share nothing with policy (for simplicity)
-   - Could share features for efficiency but adds complexity
+2. **Batch action evaluation:** Policy needs a `get_action_batch` method
+   - Returns log probs and entropy for a batch of state-action pairs
+   - Used in PPO's surrogate objective
 
-4. **Multiple epochs:** 3-10 epochs per batch
-   - Too many leads to overfitting to old data
+3. **PPO training loop needs (for future):**
+   - GAE advantage estimation (λ typically 0.95-0.99)
+   - Clipped surrogate objective (ε typically 0.1-0.3)
+   - Multiple update epochs per batch
 
-**Key Code Snippet Provided:**
+**Key Design Insight:**
 ```python
-ratio = torch.exp(new_log_probs - old_log_probs)
-clipped_ratio = torch.clamp(ratio, 1-epsilon, 1+epsilon)
-loss = -torch.min(ratio * advantages, clipped_ratio * advantages).mean()
+# PolicyNetwork needs this for PPO:
+def get_action_batch(self, states, actions):
+    # Returns log_probs and entropy for PPO loss
+    ...
 ```
 
-**My Confusion:**
-> My value function predicts ~0 everywhere. Why?
-
-**Response:**
-- Sparse rewards make value learning hard
-- Value network needs to see successful episodes
-- Try: (1) Increase batch size, (2) More training epochs, (3) Lower value learning rate
-- Consider reward shaping (but defeats purpose of sparse reward test)
-
 **What I Did:**
-Increased rollout steps from 64 to 128, helped value function learn better.
+- Built `ValueNetwork` class in `src/model.py` (same 2-layer MLP architecture as policy)
+- Added `get_action_batch` method to `PolicyNetwork`
+- Did NOT implement the PPO training loop itself — that's a next-week task
 
 ---
 
@@ -108,18 +102,18 @@ Increased rollout steps from 64 to 128, helped value function learn better.
 ### Conversation with ChatGPT
 
 **My Question:**
-> My comparison script runs but I can't tell if the policies are actually learning anything. How should I validate?
+> My ES training runs but I can't tell if the policy is actually learning. After 20 iterations the success rate is still 0%. How should I validate and debug?
 
 **Response Suggestions:**
-1. **Visualize trajectories:** Plot agent paths on grid
-2. **Compare with baselines:** 
-   - Random policy (lower bound)
-   - Optimal policy (upper bound if computable)
+1. **Visualize trajectories:** Plot agent paths on grid to see if movement patterns change
+2. **Test on simpler environments first:**
+   - Empty grid (no obstacles) — if it can't solve this, something is wrong
+   - Small grid (4×4) — faster iteration
 3. **Multiple metrics:**
    - Success rate (did it reach goal?)
    - Average reward (noisy but informative)
-   - Steps to goal (efficiency)
-4. **Statistical validity:** Run multiple trials (3-5), report mean ± std
+   - Gradient norm over time (should decrease as policy improves)
+4. **Check hyperparameters:** 20 iterations may not be enough — try 100+
 
 **Visualization Code Provided:**
 ```python
@@ -131,39 +125,39 @@ plt.imshow(grid)
 ```
 
 **Key Takeaway:**
-Need multiple metrics - success rate is most interpretable for sparse reward.
+Need multiple metrics — success rate is most interpretable for sparse reward. Also, 20 iterations is likely insufficient; need to run longer experiments.
 
 ---
 
-## Session 5: Statistical Comparison (Feb 4)
+## Session 5: Planning Multi-Trial Evaluation (Feb 4)
 
 ### Conversation with Claude
 
 **My Question:**
-> I have results from 3 trials each for ES and PPO. ES seems slightly better but how do I know if it's significant?
+> When I eventually run full ES experiments, how should I set up trials for statistical validity? I want to compare ES against a random baseline and eventually PPO.
 
 **Response:**
-- 3 trials is minimum, 5-10 better for confidence
+- Run at least 5-10 independent trials (different random seeds) for confidence
 - Report mean ± std for all metrics
 - Can do t-test if distributions roughly normal
 - Effect size (Cohen's d) more informative than p-values for small samples
 
-**Suggested Analysis:**
+**Suggested Analysis (for future use):**
 ```python
 from scipy import stats
 
-# Two-sample t-test
-t_stat, p_value = stats.ttest_ind(es_rewards, ppo_rewards)
+# Two-sample t-test (e.g. ES vs random baseline)
+t_stat, p_value = stats.ttest_ind(es_rewards, baseline_rewards)
 
 # Effect size
-cohens_d = (es_mean - ppo_mean) / pooled_std
+cohens_d = (es_mean - baseline_mean) / pooled_std
 ```
 
-**Warning:**
-With only 3 trials, p-values not very reliable. Focus on effect sizes and practical significance.
+**Key Insight:**
+With fewer than 5 trials, p-values aren't very reliable. Focus on effect sizes and practical significance.
 
-**My Decision:**
-Report mean ± std, qualitative comparison. Add more trials next week for formal tests.
+**My Plan:**
+Once ES converges in longer training runs, set up multi-trial evaluation with different seeds. Built `compute_statistics` and `print_comparison_table` in `src/utils.py` to support this.
 
 ---
 
@@ -307,8 +301,8 @@ repo/
 
 **Learning:**
 - Understood ES algorithm deeper through explanation attempts
-- Discovered GAE importance for PPO (might have missed otherwise)
-- Learned about fitness shaping (wasn't in original papers I read)
+- Learned what components are needed for PPO (GAE, clipping) to prepare for future implementation
+- Learned about fitness shaping/standardization (wasn't in original papers I read)
 
 **Trade-offs:**
 - Sometimes followed suggestions without fully understanding (had to revisit)

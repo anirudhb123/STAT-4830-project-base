@@ -15,7 +15,7 @@
 - **Unverified Baseline:** While the PPO training loop is described as implemented in the report, no comparative results are included, leaving the claim that "ES is a compelling alternative" theoretically supported but empirically untested.
 - **Unresolved Bugs:** The report mentions a "potential bug in goal detection logic" flagged by unit tests; proceeding with long training runs before fixing this risks invalidating all future results.
 - Training and evaluation use the same obstacle seed/config (seed=123 for both shaped training env and sparse eval env). That makes the current results less generalizable.
-- Because both methods train on shaped reward, the current experiment doesn’t yet validate improvement in accuracy, just differences in speed.
+- Since both methods achieve 100% accuracy, the current experiment does not demonstrate an accuracy advantage of ES over PPO, only differences in convergence speed. We will need more challenging experiments to determine whether either method yields accuracy gains and to guide further improvements to ES.
 
 ### Critical Risks/Assumptions
 We are assuming that the failure to converge is solely due to the low iteration count (20) rather than a fundamental issue with the sparse reward signal or the one-hot state encoding. There is a risk that vanilla ES without fitness shaping or curriculum learning may never find the goal on an 8x8 grid with obstacles given the sparsity of the signal.

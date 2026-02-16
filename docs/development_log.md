@@ -1,5 +1,43 @@
 # Development Log
 
+## Week 5 (Feb 9 - Feb 16, 2026)
+
+### Overview
+Added Cauchy and Laplace perturbation noise to ES. Required implementing distribution-specific score functions for correct gradient estimation.
+
+### Key Decisions
+
+**1. Multi-Distribution Noise (Feb 16)**
+- Added `sample_perturbation()` and `score_function()` in `src/utils.py`; threaded `noise_type` through `es_step`, `es_gradient_estimate`, and `train_es`
+- Key insight: the ES gradient weight must use each distribution's score function (−∇ log p(ε)), not raw ε. Gaussian: ε, Cauchy: 2ε/(1+ε²), Laplace: sign(ε)
+- Without this fix, Cauchy and Laplace both gave 0% success
+
+### Results
+
+**8×8 grid, 8 obstacles, 80 iterations, N=50, σ=0.1:**
+
+| Noise Type | Success Rate | Time    |
+|------------|-------------|---------|
+| Gaussian   | 100%        | 318.4s  |
+| Cauchy     | 0%          | 291.3s  |
+| Laplace    | 100%        | 360.5s  |
+| PPO        | 100%        | 14.7s   |
+
+- Gaussian and Laplace both solve the task; Laplace converges slightly slower with more variance
+- Cauchy never learns — train reward stays negative for all 80 iterations
+- **Why Cauchy fails here:** This gridworld requires precise parameter tuning. Cauchy's extreme perturbations (regularly 10–1000x scale) randomize the policy, destroying any useful fitness signal. The environment is too "precise" for such heavy tails.
+- **Future value:** Cauchy may still be useful in environments with many local optima or smoother reward landscapes where large jumps help escape basins. A σ sweep per distribution (Cauchy likely needs much smaller σ) and hybrid strategies (Cauchy early, Gaussian late) are natural next steps.
+
+### Code Changes
+- New in `src/utils.py`: `sample_perturbation()`, `score_function()`, `NOISE_TYPES`
+- Modified: `es_gradient_estimate()`, `train_es()` accept `noise_type`
+- Updated `src/__init__.py` exports; notebook loops over all noise types
+
+### LLM Usage Log
+**Cursor (Feb 16):** Implemented noise distributions, diagnosed score function mismatch, debugged `__pycache__` staleness
+
+---
+
 ## Week 4 (Jan 27 - Feb 6, 2026)
 
 ### Overview
@@ -306,4 +344,4 @@ g- Notebook validation & testing: 4 hours
 
 ---
 
-*Log updated: February 6, 2026*
+*Log updated: February 16, 2026*

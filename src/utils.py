@@ -10,6 +10,65 @@ from typing import Tuple, Dict, List, Optional
 from pathlib import Path
 
 
+NOISE_TYPES = ('gaussian', 'cauchy', 'laplace')
+
+
+def sample_perturbation(n_params: int, noise_type: str = 'gaussian') -> torch.Tensor:
+    """
+    Sample a perturbation vector from the specified distribution.
+
+    All distributions are centered at 0 with unit scale so that
+    the ``sigma`` parameter in ES controls the effective noise magnitude.
+
+    Args:
+        n_params: Dimensionality of the perturbation vector.
+        noise_type: One of 'gaussian', 'cauchy', or 'laplace'.
+
+    Returns:
+        epsilon: Tensor of shape (n_params,)
+    """
+    if noise_type == 'gaussian':
+        return torch.randn(n_params)
+    elif noise_type == 'cauchy':
+        return torch.distributions.Cauchy(0, 1).sample((n_params,))
+    elif noise_type == 'laplace':
+        return torch.distributions.Laplace(0, 1).sample((n_params,))
+    else:
+        raise ValueError(
+            f"Unknown noise_type '{noise_type}'. Choose from {NOISE_TYPES}."
+        )
+
+
+def score_function(epsilon: torch.Tensor, noise_type: str = 'gaussian') -> torch.Tensor:
+    """
+    Compute the negative score function  -∇_ε log p(ε)  for the given noise
+    distribution.  This is the correct weighting to use in the ES gradient
+    estimator for each distribution type.
+
+    ∇_θ J ≈ (1/Nσ) Σ F_i · score(ε_i)
+
+    Args:
+        epsilon: Perturbation tensor of any shape.
+        noise_type: One of 'gaussian', 'cauchy', or 'laplace'.
+
+    Returns:
+        Tensor of the same shape as epsilon.
+    """
+    if noise_type == 'gaussian':
+        # -∇ log N(0,I) = ε
+        return epsilon
+    elif noise_type == 'cauchy':
+        # -∇ log Cauchy(0,1) = 2ε / (1 + ε²)
+        return 2 * epsilon / (1 + epsilon ** 2)
+    elif noise_type == 'laplace':
+        # -∇ log Laplace(0,1) = sign(ε)
+        return torch.sign(epsilon)
+    else:
+        raise ValueError(
+            f"Unknown noise_type '{noise_type}'. Choose from {NOISE_TYPES}."
+        )
+
+
 def evaluate_policy(
     policy,
     env,
@@ -65,13 +124,14 @@ def es_gradient_estimate(
     N: int = 20,
     sigma: float = 0.05,
     n_eval_episodes: int = 5,
-    max_steps: int = 50
+    max_steps: int = 50,
+    noise_type: str = 'gaussian'
 ) -> Tuple[torch.Tensor, float, List[float]]:
     """
     Estimate gradient using Evolution Strategies.
     
     Algorithm:
-        1. Sample N perturbations ε_i ~ N(0, I)
+        1. Sample N perturbations ε_i from the chosen distribution
         2. Evaluate fitness R(θ + σε_i) for each perturbation
         3. Estimate gradient: ∇J ≈ (1/Nσ) Σ R(θ + σε_i) · ε_i
     
@@ -82,6 +142,7 @@ def es_gradient_estimate(
         sigma: Noise scale
         n_eval_episodes: Episodes per perturbation evaluation
         max_steps: Max steps per episode
+        noise_type: Perturbation distribution — 'gaussian', 'cauchy', or 'laplace'
     
     Returns:
         gradient: Estimated gradient (flattened parameter vector)
@@ -98,8 +159,8 @@ def es_gradient_estimate(
     
     # Sample and evaluate perturbations
     for i in range(N):
-        # Sample perturbation
-        epsilon = torch.randn(n_params)
+        # Sample perturbation from chosen distribution
+        epsilon = sample_perturbation(n_params, noise_type)
         perturbations.append(epsilon)
         
         # Perturb parameters
@@ -134,6 +195,9 @@ def es_gradient_estimate(
     fitness_tensor = torch.tensor(fitness_values, dtype=torch.float32)
     perturbations_tensor = torch.stack(perturbations)
     
+    # Apply the correct score function for the chosen noise distribution
+    score_weights = score_function(perturbations_tensor, noise_type)
+    
     # Standardize fitness (improves stability)
     fitness_std = fitness_tensor.std()
     if fitness_std > 1e-8:
@@ -141,8 +205,8 @@ def es_gradient_estimate(
     else:
         fitness_normalized = fitness_tensor - fitness_tensor.mean()
     
-    # Gradient estimate: (1/Nσ) Σ F_i · ε_i
-    gradient = (perturbations_tensor.T @ fitness_normalized) / (N * sigma)
+    # Gradient estimate: (1/Nσ) Σ F_i · score(ε_i)
+    gradient = (score_weights.T @ fitness_normalized) / (N * sigma)
     
     return gradient, fitness_tensor.mean().item(), fitness_values
 
@@ -157,7 +221,8 @@ def train_es(
     n_eval_episodes: int = 5,
     max_steps: int = 50,
     eval_every: int = 10,
-    verbose: bool = True
+    verbose: bool = True,
+    noise_type: str = 'gaussian'
 ) -> Dict[str, List]:
     """
     Train policy using Evolution Strategies.
@@ -173,6 +238,7 @@ def train_es(
         max_steps: Max steps per episode
         eval_every: Evaluate policy every N iterations
         verbose: Print progress
+        noise_type: Perturbation distribution — 'gaussian', 'cauchy', or 'laplace'
     
     Returns:
         history: Dictionary with training history
@@ -196,7 +262,8 @@ def train_es(
             N=N,
             sigma=sigma,
             n_eval_episodes=n_eval_episodes,
-            max_steps=max_steps
+            max_steps=max_steps,
+            noise_type=noise_type
         )
         
         # Update parameters

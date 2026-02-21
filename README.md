@@ -79,7 +79,8 @@ Remember:
 ```
 your-repo/
 ├── README.md                    # This file
-├── report.md                    # Your project report
+├── reportWeek4.md               # Week 4 report (draft 1)
+├── reportWeek6.md               # Week 6 report (draft 2)
 ├── notebooks/                   # Jupyter notebooks
 ├── src/                        # Source code
 ├── tests/                      # Test files

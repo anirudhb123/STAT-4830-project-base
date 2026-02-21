@@ -12,6 +12,9 @@ from .model import (
 )
 
 from .utils import (
+    NOISE_TYPES,
+    sample_perturbation,
+    score_function,
     evaluate_policy,
     es_gradient_estimate,
     train_es,
@@ -26,6 +29,9 @@ __all__ = [
     "HarderGridWorld",
     "PolicyNetwork",
     "ValueNetwork",
+    "NOISE_TYPES",
+    "sample_perturbation",
+    "score_function",
     "evaluate_policy",
     "es_gradient_estimate",
     "train_es",

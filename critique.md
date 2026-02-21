@@ -3,18 +3,19 @@
 ## ORIENT
 
 ### Strengths
-- **Clear Motivation:** The report effectively articulates why ES is a relevant candidate for sparse reward settings where gradient-based methods struggle, supported by a clear mathematical formulation.
-- **Working Implementation:** Both ES and PPO successfully converge to 100% success rate, demonstrating that the implementations are correct and functional.
-- **Fair Comparison Framework:** The notebook implements a proper comparison where both methods train on shaped rewards and evaluate on sparse rewards, ensuring an apples-to-apples comparison.
-- **Code Structure:** The codebase is well-organized into modular components (`model.py`, `utils.py`, `ppo_training.py`) with 19 passing unit tests covering all major components.
-- **Reproducibility:** Fixed seeds, documented hyperparameters, and clear implementation make results reproducible.
+- Clear motivation + correct framing: The writeup clearly motivates ES as parameter-space optimization that can work when action-space gradients are unreliable, and the report’s mathematical framing matches the implementation.
+
+- Working end-to-end comparison (now empirical, not just theoretical): The notebook actually runs a fair ES vs PPO comparison: both train on shaped rewards and are evaluated on sparse rewards only (0/+1). In the shown run, both methods reach 100% success on the sparse evaluation environment.
+
+- Modular code + extensibility: The separation into model.py, ppo_training.py, and utilities supports controlled experiments (swapping envs, reward functions, hyperparams) without refactoring.
+
+- Reproducible setup: Fixed seeds and consistent environment settings (8×8, 8 obstacles, max 50 steps) make results easier to replicate and compare.
 
 ### Areas for Improvement
-- **Task Difficulty Too Low:** With reward shaping (+0.2 for moving closer to goal), both ES and PPO achieve 100% success, making it impossible to differentiate their performance or identify strengths/weaknesses of each approach.
-- **Limited Generalization Testing:** Training and evaluation use the same obstacle configuration (seed=123), so we don't know if policies generalize to unseen obstacle placements.
-- **No Variance Analysis:** Results use fixed seeds without multiple trials. We lack error bars and statistical significance tests (e.g., Cohen's d) to make rigorous claims about method comparison.
-- **Insufficient Sample Efficiency Analysis:** While both methods converge, we haven't analyzed how many environment interactions each requires or which is more sample-efficient.
-- **Scalability Untested:** The 8×8 grid with one-hot encoding (64-dim) is small. We haven't tested larger grids, deeper networks, or more challenging variants like `HarderGridWorld`.
+- **Unverified Baseline:** While the PPO training loop is described as implemented in the report, no comparative results are included, leaving the claim that "ES is a compelling alternative" theoretically supported but empirically untested.
+- **Unresolved Bugs:** The report mentions a "potential bug in goal detection logic" flagged by unit tests; proceeding with long training runs before fixing this risks invalidating all future results.
+- Training and evaluation use the same obstacle seed/config (seed=123 for both shaped training env and sparse eval env). That makes the current results less generalizable.
+- Since both methods achieve 100% accuracy, the current experiment does not demonstrate an accuracy advantage of ES over PPO, only differences in convergence speed. We will need more challenging experiments to determine whether either method yields accuracy gains and to guide further improvements to ES.
 
 ### Critical Risks/Assumptions
 We are assuming that the 100% success rate is meaningful rather than an artifact of an overly easy task. The current results suggest reward shaping may provide too much guidance, potentially masking important differences between ES and PPO that would emerge on harder problems. There is a risk that our positive results are not generalizable to truly sparse reward settings or more complex environments.

@@ -32,12 +32,22 @@ class WordleDiscretePolicy(nn.Module):
         self,
         state_dim: int = 64,
         hidden_dim: int = 128,
-        n_layers: int = 3
+        n_layers: int = 3,
+        use_prime_targets: bool = True
     ):
+        """
+        Initialize policy.
+        
+        Args:
+            state_dim: Dimension of state embedding
+            hidden_dim: Hidden layer size
+            n_layers: Number of hidden layers
+            use_prime_targets: If True, use vocabulary from Prime Intellect dataset
+        """
         super().__init__()
         
         # Load vocabulary
-        self.vocab = WordVocabulary()
+        self.vocab = WordVocabulary(use_prime_targets=use_prime_targets)
         self.action_dim = len(self.vocab)
         self.state_dim = state_dim
         
@@ -80,7 +90,8 @@ class WordleDiscretePolicy(nn.Module):
     def get_action(
         self,
         state_embedding: np.ndarray,
-        deterministic: bool = False
+        deterministic: bool = False,
+        previous_guesses: Optional[List[str]] = None
     ) -> Tuple[int, Optional[torch.Tensor]]:
         """
         Sample action (word index) from policy.
@@ -88,6 +99,7 @@ class WordleDiscretePolicy(nn.Module):
         Args:
             state_embedding: numpy array of shape (state_dim,)
             deterministic: if True, return argmax action
+            previous_guesses: list of already-guessed words to mask out
             
         Returns:
             action_idx: integer index of the word to guess
@@ -99,6 +111,17 @@ class WordleDiscretePolicy(nn.Module):
                 state_tensor = state_tensor.unsqueeze(0)
             
             logits = self.forward(state_tensor)
+            
+            # Mask out previously guessed words
+            if previous_guesses:
+                mask = torch.zeros_like(logits)
+                for guess in previous_guesses:
+                    guess_upper = guess.upper()
+                    if guess_upper in self.vocab.word_to_idx:
+                        idx = self.vocab.word_to_idx[guess_upper]
+                        mask[..., idx] = -float('inf')
+                logits = logits + mask
+            
             probs = F.softmax(logits, dim=-1)
             
             if deterministic:
@@ -113,7 +136,8 @@ class WordleDiscretePolicy(nn.Module):
     def get_action_word(
         self,
         state_embedding: np.ndarray,
-        deterministic: bool = False
+        deterministic: bool = False,
+        previous_guesses: Optional[List[str]] = None
     ) -> Tuple[str, Optional[torch.Tensor]]:
         """
         Get action as a word (for Wordle gameplay).
@@ -122,7 +146,7 @@ class WordleDiscretePolicy(nn.Module):
             word: The guessed word
             log_prob: Log probability of the action
         """
-        action_idx, log_prob = self.get_action(state_embedding, deterministic)
+        action_idx, log_prob = self.get_action(state_embedding, deterministic, previous_guesses)
         word = self.vocab.action_to_word(action_idx)
         return word, log_prob
     
@@ -139,7 +163,11 @@ class WordleDiscretePolicy(nn.Module):
             xml_action: Formatted as <think>...</think><guess>WORD</guess>
             log_prob: Log probability of the action
         """
-        word, log_prob = self.get_action_word(state_embedding, deterministic)
+        word, log_prob = self.get_action_word(
+            state_embedding, 
+            deterministic, 
+            previous_guesses=state.previous_guesses
+        )
         
         # Generate simple reasoning
         think_text = self._generate_think_text(state, word)

@@ -18,6 +18,45 @@ def _set_flat_params(policy, flat_params: torch.Tensor):
         offset += param_length
 
 
+def _evaluate_perturbation(policy, env, perturbed_params, n_eval_episodes, max_turns):
+    """Evaluate fitness of a perturbed policy."""
+    # Set perturbed parameters
+    _set_flat_params(policy, perturbed_params)
+    
+    # Evaluate fitness (average reward over episodes)
+    fitness = 0.0
+    for _ in range(n_eval_episodes):
+        state = env.reset()
+        episode_reward = 0
+        done = False
+        turns = 0
+        
+        policy.eval()
+        with torch.no_grad():
+            while not done and turns < max_turns:
+                # Get state embedding
+                state_embedding = env.get_state_embedding(state)
+                
+                # Get action from policy
+                if hasattr(policy, 'format_action_xml'):
+                    action_xml, _ = policy.format_action_xml(
+                        state, state_embedding, deterministic=False
+                    )
+                else:
+                    action_idx, _ = policy.get_action(state_embedding, deterministic=False)
+                    word = policy.vocab.action_to_word(action_idx)
+                    action_xml = f"<guess>{word}</guess>"
+                
+                # Take step
+                state, reward, done, info = env.step(action_xml)
+                episode_reward += reward
+                turns += 1
+        
+        fitness += episode_reward
+    
+    return fitness / n_eval_episodes
+
+
 def es_gradient_estimate_wordle(
     policy,
     env,
@@ -61,44 +100,8 @@ def es_gradient_estimate_wordle(
         epsilon = torch.randn(n_params)
         perturbations.append(epsilon)
         
-        # Perturb parameters
-        perturbed_params = params + sigma * epsilon
-        
-        # Set perturbed parameters
-        _set_flat_params(policy, perturbed_params)
-        
-        # Evaluate fitness (average reward over episodes)
-        fitness = 0.0
-        for _ in range(n_eval_episodes):
-            state = env.reset()
-            episode_reward = 0
-            done = False
-            turns = 0
-            
-            policy.eval()
-            with torch.no_grad():
-                while not done and turns < max_turns:
-                    # Get state embedding
-                    state_embedding = env.get_state_embedding(state)
-                    
-                    # Get action from policy
-                    if hasattr(policy, 'format_action_xml'):
-                        action_xml, _ = policy.format_action_xml(
-                            state, state_embedding, deterministic=False
-                        )
-                    else:
-                        action_idx, _ = policy.get_action(state_embedding, deterministic=False)
-                        word = policy.vocab.action_to_word(action_idx)
-                        action_xml = f"<guess>{word}</guess>"
-                    
-                    # Take step
-                    state, reward, done, info = env.step(action_xml)
-                    episode_reward += reward
-                    turns += 1
-            
-            fitness += episode_reward
-        
-        fitness /= n_eval_episodes
+        # Evaluate perturbation
+        fitness = _evaluate_perturbation(policy, env, params + sigma * epsilon, n_eval_episodes, max_turns)
         fitness_values.append(fitness)
     
     # Restore original parameters

@@ -331,28 +331,39 @@ class WordleEnvironmentWrapper:
         if not TORCH_AVAILABLE:
             raise ImportError("numpy is required for state embeddings. Install requirements.txt")
         
-        # Features:
-        # - Turn number (normalized)
-        # - Number of previous guesses
-        # - Vocabulary features from conversation history
-        
         features = []
         
-        # Turn number (0-1 normalized)
-        features.append(state.turn_number / self.max_turns)
+        # Basic features (3 dimensions)
+        features.append(state.turn_number / self.max_turns)  # Turn number (0-1)
+        features.append(len(state.previous_guesses) / self.max_turns)  # Guesses count (0-1)
+        features.append(1.0 if state.game_complete else 0.0)  # Game complete flag
         
-        # Previous guesses count (0-1 normalized)
-        features.append(len(state.previous_guesses) / self.max_turns)
+        # Letter features from feedback (26*2 = 52 dimensions)
+        # For each letter: 0=not tried, 0.5=tried but wrong position (YELLOW), 1.0=correct (GREEN)
+        letter_status = np.zeros(26, dtype=np.float32)
+        letter_tried = np.zeros(26, dtype=np.float32)
         
-        # Game complete flag
-        features.append(1.0 if state.game_complete else 0.0)
+        for feedback_str in state.feedback_history:
+            # Parse feedback like "C:GRAY H:GRAY E:GRAY A:YELLOW P:GRAY"
+            for part in feedback_str.split():
+                if ':' in part:
+                    letter, color = part.split(':')
+                    if letter.isalpha():
+                        idx = ord(letter.upper()) - ord('A')
+                        if 0 <= idx < 26:
+                            letter_tried[idx] = 1.0
+                            if color == 'GREEN':
+                                letter_status[idx] = 1.0
+                            elif color == 'YELLOW':
+                                letter_status[idx] = max(0.5, letter_status[idx])
         
-        # Simple text features: length of conversation
-        features.append(len(state.conversation_history) / 1000.0)
+        # Add letter features (52 dimensions total)
+        features.extend(letter_tried.tolist())
+        features.extend(letter_status.tolist())
         
-        # Pad to fixed size (e.g., 64 dimensions)
+        # Pad to fixed size (64 dimensions)
         embedding = np.zeros(64, dtype=np.float32)
-        embedding[:len(features)] = features
+        embedding[:len(features)] = features[:64]  # Truncate if too long
         
         return embedding
 
@@ -364,35 +375,168 @@ class WordVocabulary:
     This is used to map words to action indices for discrete action space.
     """
     
-    def __init__(self):
-        self.words = self._load_common_words()
+    def __init__(self, use_prime_targets: bool = True):
+        """
+        Initialize vocabulary.
+        
+        Args:
+            use_prime_targets: If True, extract targets from Prime Intellect dataset
+        """
+        if use_prime_targets:
+            self.words = self._load_prime_targets()
+        else:
+            self.words = self._load_common_words()
+        
         self.word_to_idx = {word: idx for idx, word in enumerate(self.words)}
         self.idx_to_word = {idx: word for word, idx in self.word_to_idx.items()}
+    
+    def _load_prime_targets(self) -> List[str]:
+        """Load vocabulary from Prime Intellect's Wordle dataset."""
+        try:
+            from verifiers import load_environment
+            import os
+            os.environ.setdefault('NLTK_DATA', os.path.join(os.getcwd(), '.venv', 'nltk_data'))
+            
+            env = load_environment('wordle')
+            
+            # Extract all target words
+            targets = set()
+            for episode in env.dataset:
+                target = episode.get('target', episode.get('answer', ''))
+                if isinstance(target, list):
+                    target = target[0] if len(target) > 0 else ''
+                if target and len(str(target)) == 5:
+                    targets.add(str(target).upper())
+            
+            words = sorted(list(targets))
+            print(f"✓ Loaded {len(words)} words from Prime Intellect dataset")
+            return words
+            
+        except Exception as e:
+            print(f"Could not load Prime Intellect targets: {e}")
+            print("Falling back to common words list")
+            return self._load_common_words()
         
     def _load_common_words(self) -> List[str]:
         """
         Load common 5-letter words for Wordle.
         
-        In practice, you might want to use the actual Wordle word list.
-        For now, we'll use a small set of common words.
+        Expanded vocabulary to increase coverage of Prime Intellect's word list.
         """
-        # Common Wordle starter words and high-frequency 5-letter words
+        # Common Wordle words - expanded list
         common_words = [
+            # High-frequency starters
             "CRANE", "SLANT", "TRACE", "SLATE", "CRATE", "LEAST", "STALE",
+            "AUDIO", "ADIEU", "AROSE", "IRATE", "RAISE", "ARISE", "ALERT",
+            
+            # Common words with high vowel coverage
+            "AISLE", "ALIEN", "ALONE", "ANIME", "OASIS", "QUEUE", "QUIET",
+            
+            # Common consonant patterns
             "HEART", "EARTH", "DREAM", "BREAD", "STEAM", "BEAST", "FEAST",
             "PLANT", "GRAND", "STAND", "BRAND", "LIGHT", "NIGHT", "RIGHT",
             "FIGHT", "MIGHT", "SIGHT", "TIGHT", "EIGHT", "WEIGH", "NEIGH",
             "THEIR", "FIELD", "YIELD", "WIELD", "CHIEF", "GRIEF", "BRIEF",
-            "AUDIO", "ADIEU", "AROSE", "IRATE", "RAISE", "ARISE", "ALERT",
+            
+            # S-words
             "TALES", "STEAL", "RATES", "STARE", "TEARS", "TARES", "RESAT",
             "STORE", "STONE", "NOTES", "TONES", "ONSET", "SNORE", "SPORT",
             "PORTS", "STORM", "FORMS", "WORMS", "WORDS", "LORDS", "CORDS",
+            "SPARE", "SHARE", "SNARE", "SCARE", "STAKE", "SNAKE", "SPRAY",
+            "SPEAR", "SHEAR", "SMEAR", "SWEAR", "SPOKE", "SMOKE", "SCORE",
+            
+            # CL- words
             "CLEAR", "CLEAN", "CLAIM", "CLAMP", "CRAMP", "CRISP", "CLASP",
-            "BLAST", "BOAST", "COAST", "ROAST", "TOAST", "BEAST", "FEAST",
-            "LEARN", "EARLY", "YEARS", "TEARS", "GEARS", "BEARS", "PEARS",
-            "SPEAR", "SHEAR", "SMEAR", "SWEAR", "CLEAR", "SPARE",
-            "SHARE", "SNARE", "SCARE", "STARE", "STAKE", "SNAKE", "BRAKE",
-            "BREAK", "BREAD", "DREAD", "TREAD", "TREND", "BLEND", "SPEND"
+            "CLIMB", "CLING", "CLICK", "CLOUD", "CLOWN", "CLONE",
+            
+            # B- words
+            "BLAST", "BOAST", "COAST", "ROAST", "TOAST", "BRACE", "BRAVE",
+            "BRAKE", "BREAK", "BREAD", "BREED", "BRING", "BRINK", "BROAD",
+            "BROWN", "BRUSH", "BRAIN", "BRASS", "BRASH",
+            
+            # Common endings
+            "LEARN", "EARLY", "YEARS", "GEARS", "BEARS", "PEARS", "PEARL",
+            "DREAD", "TREAD", "TREND", "BLEND", "SPEND", "TRIAL", "TRAIL",
+            
+            # Additional high-frequency words
+            "ABOUT", "ABOVE", "ACTOR", "ACUTE", "ADMIT", "ADOPT", "ADULT",
+            "AFTER", "AGAIN", "AGENT", "AGING", "AGREE", "AHEAD", "ALARM",
+            "ALBUM", "ALLOW", "ALONG", "ALTER", "AMBER", "AMEND", "AMONG",
+            "AMPLE", "ANGEL", "ANGER", "ANGLE", "ANGRY", "APART", "APPLE",
+            "APPLY", "ARENA", "ARGUE", "ARRAY", "ARROW", "ASIDE", "ASSET",
+            "AVOID", "AWARD", "AWARE", "BEACH", "BEING", "BELOW", "BENCH",
+            "BILLY", "BIRTH", "BLACK", "BLAME", "BLANK", "BLEED", "BLESS",
+            "BLIND", "BLOCK", "BLOOD", "BLOOM", "BOARD", "BOOST", "BOOTH",
+            "BOUND", "BRAIN", "BRASS", "BRAVE", "BUYER", "CABLE", "CALIF",
+            "CARRY", "CATCH", "CAUSE", "CHAIN", "CHAIR", "CHAOS", "CHARM",
+            "CHART", "CHASE", "CHEAP", "CHECK", "CHESS", "CHEST", "CHILD",
+            "CHINA", "CHOSE", "CIVIL", "CLASH", "CLASS", "CLEAR", "CLERK",
+            "CLICK", "CLIMB", "CLOCK", "CLONE", "CLOSE", "CLOTH", "CLOUD",
+            "COACH", "COAST", "COUNT", "COUCH", "COULD", "COURT", "COVER",
+            "CRACK", "CRAFT", "CRASH", "CRAZY", "CREAM", "CRIME", "CROSS",
+            "CROWD", "CROWN", "CRUDE", "CURVE", "CYCLE", "DAILY", "DAIRY",
+            "DANCE", "DATED", "DEALT", "DEATH", "DEBUT", "DELAY", "DELTA",
+            "DENSE", "DEPTH", "DOING", "DOUBT", "DOZEN", "DRAFT", "DRAIN",
+            "DRAMA", "DRAWN", "DROWN", "DYING", "EAGER", "EAGLE", "ELECT",
+            "ELITE", "EMPTY", "ENEMY", "ENJOY", "ENTER", "ENTRY", "EQUAL",
+            "ERROR", "EVENT", "EVERY", "EXACT", "EXIST", "EXTRA", "FAITH",
+            "FALSE", "FANCY", "FATAL", "FAULT", "FIBER", "FIFTY", "FINAL",
+            "FIRST", "FIXED", "FLASH", "FLEET", "FLESH", "FLOAT", "FLOOR",
+            "FLUID", "FOCUS", "FORCE", "FORTH", "FORTY", "FORUM", "FOUND",
+            "FRAME", "FRANK", "FRAUD", "FRESH", "FRONT", "FRUIT", "FULLY",
+            "FUNNY", "GIANT", "GIVEN", "GLASS", "GLOBE", "GLORY", "GRACE",
+            "GRADE", "GRAIN", "GRANT", "GRAPE", "GRAPH", "GRASP", "GRASS",
+            "GRAVE", "GREAT", "GREED", "GREEN", "GREET", "GRIEF", "GRILL",
+            "GRIND", "GROSS", "GROUP", "GROVE", "GROWN", "GUARD", "GUESS",
+            "GUEST", "GUIDE", "GUILD", "GUILT", "HABIT", "HAPPY", "HARSH",
+            "HASTE", "HEART", "HEAVY", "HEDGE", "HENRY", "HORSE", "HOTEL",
+            "HOUSE", "HUMAN", "HUMOR", "IDEAL", "IMAGE", "IMPLY", "INDEX",
+            "INNER", "INPUT", "ISSUE", "JOINT", "JUDGE", "KNOWN", "LABEL",
+            "LABOR", "LARGE", "LASER", "LATER", "LAUGH", "LAYER", "LEASE",
+            "LEAVE", "LEGAL", "LEMON", "LEVEL", "LIGHT", "LIMIT", "LINED",
+            "LINKS", "LIVER", "LOCAL", "LODGE", "LOGIC", "LOOSE", "LOVER",
+            "LOWER", "LOYAL", "LUCKY", "LUNCH", "LYING", "MAGIC", "MAJOR",
+            "MAKER", "MARCH", "MATCH", "MAYBE", "MAYOR", "MEANT", "MEDIA",
+            "METAL", "METER", "MIGHT", "MINOR", "MINUS", "MIXED", "MODEL",
+            "MONEY", "MONTH", "MORAL", "MOTOR", "MOUNT", "MOUSE", "MOUTH",
+            "MOVED", "MOVIE", "MUSIC", "NEEDS", "NERVE", "NEVER", "NEWLY",
+            "NIGHT", "NOISE", "NORTH", "NOTED", "NOVEL", "NURSE", "OCCUR",
+            "OCEAN", "OFFER", "OFTEN", "ORDER", "OTHER", "OUGHT", "OUTER",
+            "OWNER", "PAINT", "PANEL", "PANIC", "PAPER", "PARKS", "PARTY",
+            "PEACE", "PENNY", "PHASE", "PHONE", "PHOTO", "PIANO", "PILOT",
+            "PITCH", "PLACE", "PLAIN", "PLANE", "PLATE", "POINT", "POUND",
+            "POWER", "PRESS", "PRICE", "PRIDE", "PRIME", "PRINT", "PRIOR",
+            "PRIZE", "PROOF", "PROUD", "PROVE", "QUEEN", "QUICK", "QUIET",
+            "QUITE", "RADIO", "RAISE", "RANGE", "RAPID", "RATIO", "REACH",
+            "READY", "REFER", "RELAX", "REPLY", "RIDER", "RIDGE", "RIFLE",
+            "RIGHT", "RIGID", "RIVAL", "RIVER", "ROBIN", "ROCKY", "ROGER",
+            "ROMAN", "ROUGH", "ROUND", "ROUTE", "ROYAL", "RURAL", "SCALE",
+            "SCARE", "SCENE", "SCOPE", "SCORE", "SENSE", "SERVE", "SEVEN",
+            "SHALL", "SHAPE", "SHARE", "SHARP", "SHEET", "SHELF", "SHELL",
+            "SHIFT", "SHINE", "SHIRT", "SHOCK", "SHOOT", "SHORT", "SHOWN",
+            "SIGHT", "SILLY", "SINCE", "SIXTH", "SIZED", "SKILL", "SLEEP",
+            "SLIDE", "SMALL", "SMART", "SMILE", "SMITH", "SMOKE", "SOLID",
+            "SOLVE", "SORRY", "SOUND", "SOUTH", "SPACE", "SPARE", "SPEAK",
+            "SPEED", "SPEND", "SPENT", "SPLIT", "SPOKE", "SPORT", "STAFF",
+            "STAGE", "STAKE", "STAND", "START", "STATE", "STEAM", "STEEL",
+            "STEEP", "STEER", "STICK", "STILL", "STOCK", "STONE", "STOOD",
+            "STORE", "STORY", "STRIP", "STUCK", "STUDY", "STUFF", "STYLE",
+            "SUGAR", "SUITE", "SUNNY", "SUPER", "SURGE", "SWEET", "SWEPT",
+            "SWIFT", "SWING", "SWISS", "SWORD", "TABLE", "TAKEN", "TASTE",
+            "TAXES", "TEACH", "TEMPO", "TENDS", "TERMS", "TEXAS", "THANK",
+            "THEFT", "THEIR", "THEME", "THERE", "THESE", "THICK", "THING",
+            "THINK", "THIRD", "THOSE", "THREE", "THREW", "THROW", "THUMB",
+            "TIGHT", "TIMER", "TITLE", "TODAY", "TOPIC", "TOTAL", "TOUCH",
+            "TOUGH", "TOWER", "TRACK", "TRACT", "TRADE", "TRAIL", "TRAIN",
+            "TRAIT", "TREAT", "TREND", "TRIAL", "TRIBE", "TRICK", "TRIED",
+            "TROOP", "TRUCK", "TRULY", "TRUNK", "TRUST", "TRUTH", "TWICE",
+            "UNCLE", "UNDER", "UNDUE", "UNION", "UNITY", "UNTIL", "UPPER",
+            "UPSET", "URBAN", "USAGE", "USUAL", "VALID", "VALUE", "VIDEO",
+            "VIRUS", "VISIT", "VITAL", "VOCAL", "VOICE", "WASTE", "WATCH",
+            "WATER", "WHEEL", "WHERE", "WHICH", "WHILE", "WHITE", "WHOLE",
+            "WHOSE", "WOMAN", "WOMEN", "WORLD", "WORRY", "WORSE", "WORST",
+            "WORTH", "WOULD", "WOUND", "WRITE", "WRONG", "WROTE", "YOUNG",
+            "YOURS", "YOUTH"
         ]
         
         # Remove duplicates and ensure 5 letters

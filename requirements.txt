@@ -1,4 +1,4 @@
-# Week 4 Dependencies for ES GridWorld Project
+# Dependencies for Wordle RL Project with Prime Intellect
 # Install with: pip install -r requirements.txt
 
 # Core dependencies
@@ -6,6 +6,15 @@ torch>=2.0.0
 numpy>=1.24.0
 matplotlib>=3.7.0
 seaborn>=0.12.0
+
+# Prime Intellect Verifiers
+verifiers>=0.1.9
+textarena>=0.7.4
+nltk>=3.9.2
+
+# Transformers for LLM-based policies
+transformers>=4.30.0
+tokenizers>=0.13.0
 
 # Development & testing
 jupyter>=1.0.0
@@ -15,3 +24,4 @@ psutil>=5.9.0
 # Optional (for enhanced features)
 scipy>=1.10.0  # For statistical tests
 tqdm>=4.65.0   # For progress bars
+wandb>=0.15.0  # For experiment tracking

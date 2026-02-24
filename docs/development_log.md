@@ -1,5 +1,77 @@
 # Development Log
 
+## Week 7 (Feb 17 - Feb 24, 2026)
+
+### Overview
+Implemented rank-1 LoRA for GridWorld ES in LoRA-only mode (base weights frozen) and added a Week 7 notebook comparing standard ES vs LoRA-ES across Gaussian, Cauchy, and Laplace perturbation noise.
+
+### Key Decisions
+
+**1. LoRA Scope and Optimization Mode (Feb 24)**
+- Scoped first implementation to **GridWorld only** to keep risk low and validate correctness before extending to Wordle
+- Chose **LoRA-only updates** (`param_mode='lora'`) rather than updating LoRA + base weights
+- Rationale: preserves PEFT behavior, reduces ES search dimensionality, and isolates whether rank-1 adapters are sufficient
+
+**2. Rank-1 Adapter Design**
+- Added `LoRALinearRank1` to `src/model.py` with:
+  - Frozen base projection (`nn.Linear`)
+  - Rank-1 delta: `alpha * (x @ a) * b`
+- Added `PolicyNetwork` options: `use_lora`, `lora_alpha`, `lora_init_scale`
+- Added helper methods: `lora_parameters()`, `base_parameters()`, `count_lora_parameters()`, and `freeze_base_parameters()`
+
+**3. ES Parameter Subset Selection**
+- Extended `src/utils.py` with `param_mode` support in:
+  - `es_gradient_estimate(...)`
+  - `train_es(...)`
+- Added utilities to flatten/set selected parameter subsets (`all` vs `lora`) while keeping backward-compatible defaults
+- Ensured perturbation apply/restore uses the same selected parameter set, preventing accidental base-weight mutation
+
+### Results
+
+**Validation and Testing**
+- `pytest tests/test_basic.py -q`: **22 passed**
+- Added LoRA-focused tests to `tests/test_basic.py`:
+  - LoRA forward pass + freeze behavior
+  - LoRA-only ES gradient shape
+  - LoRA-only update changes adapters while base params remain unchanged
+
+### Notebook Deliverable
+- Added `notebooks/week7_implementation.ipynb` following prior-week structure
+- Focus: **GridWorld only**, comparing:
+  - Standard ES (`param_mode='all'`)
+  - Rank-1 LoRA ES (`param_mode='lora'`)
+- Runs all perturbation distributions in `NOISE_TYPES`: Gaussian, Cauchy, Laplace
+- Includes:
+  - problem statement and math section
+  - parameter-efficiency comparison
+  - side-by-side metrics table (reward/success/grad norm/runtime)
+  - plots for final metrics and training curves by noise type
+
+### Code Changes
+- `src/model.py`:
+  - Added `LoRALinearRank1`
+  - Extended `PolicyNetwork` with LoRA configuration and parameter helper methods
+- `src/utils.py`:
+  - Added `PARAM_MODES`
+  - Added `param_mode` to ES APIs
+  - Added selected-parameter flatten/set utilities
+- `tests/test_basic.py`:
+  - Added LoRA behavior and LoRA-only ES regression tests
+- `notebooks/week7_implementation.ipynb`:
+  - New Week 7 experiment notebook
+
+### Open Questions
+1. Should LoRA ES use the same `(sigma, alpha)` as standard ES, or should each method/noise type be tuned separately?
+2. Does rank-1 LoRA remain competitive on `HarderGridWorld` or larger state spaces?
+3. For heavy-tailed noise (Cauchy), does LoRA-only search space improve stability enough to recover performance with smaller `sigma`?
+
+### LLM Usage Log
+**Cursor (Feb 24):**
+- Implemented rank-1 LoRA wrappers and LoRA-only ES parameter selection
+- Added regression tests and created Week 7 notebook comparison across all noise types
+
+---
+
 ## Week 5 (Feb 9 - Feb 16, 2026)
 
 ### Overview
@@ -344,4 +416,4 @@ g- Notebook validation & testing: 4 hours
 
 ---
 
-*Log updated: February 16, 2026*
+*Log updated: February 24, 2026*

@@ -14,7 +14,7 @@ import torch.nn.functional as F
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Iterator
 
 
 # ============================================================================
@@ -225,6 +225,43 @@ class HarderGridWorld(GridWorld):
 # POLICY AND VALUE NETWORKS
 # ============================================================================
 
+class LoRALinearRank1(nn.Module):
+    """
+    Rank-1 LoRA wrapper around a linear projection.
+
+    Effective weight: W' = W + alpha * (b @ a^T)
+    where a is (in_features,) and b is (out_features,).
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = True,
+        alpha: float = 1.0,
+        init_scale: float = 1e-3
+    ):
+        super().__init__()
+        self.base = nn.Linear(in_features, out_features, bias=bias)
+        self.alpha = alpha
+
+        # Rank-1 factors. Small init keeps the adapter near zero at startup.
+        self.lora_a = nn.Parameter(torch.randn(in_features) * init_scale)
+        self.lora_b = nn.Parameter(torch.zeros(out_features))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        base_out = self.base(x)
+        scalar_proj = x @ self.lora_a
+        delta = scalar_proj.unsqueeze(-1) * self.lora_b
+        return base_out + self.alpha * delta
+
+    def freeze_base(self):
+        """Freeze the base linear weights and bias."""
+        self.base.weight.requires_grad = False
+        if self.base.bias is not None:
+            self.base.bias.requires_grad = False
+
+
 class PolicyNetwork(nn.Module):
     """
     Simple feedforward policy network.
@@ -236,33 +273,80 @@ class PolicyNetwork(nn.Module):
         state_dim: int,
         action_dim: int,
         hidden_dim: int = 64,
-        n_layers: int = 2
+        n_layers: int = 2,
+        use_lora: bool = False,
+        lora_alpha: float = 1.0,
+        lora_init_scale: float = 1e-3
     ):
         super().__init__()
         self.state_dim = state_dim
         self.action_dim = action_dim
+        self.use_lora = use_lora
         
         # Build network
         layers = []
         prev_dim = state_dim
         for i in range(n_layers):
-            layers.append(nn.Linear(prev_dim, hidden_dim))
+            if use_lora:
+                layers.append(LoRALinearRank1(
+                    prev_dim,
+                    hidden_dim,
+                    alpha=lora_alpha,
+                    init_scale=lora_init_scale
+                ))
+            else:
+                layers.append(nn.Linear(prev_dim, hidden_dim))
             layers.append(nn.ReLU())
             prev_dim = hidden_dim
         
         # Output layer
-        layers.append(nn.Linear(prev_dim, action_dim))
+        if use_lora:
+            layers.append(LoRALinearRank1(
+                prev_dim,
+                action_dim,
+                alpha=lora_alpha,
+                init_scale=lora_init_scale
+            ))
+        else:
+            layers.append(nn.Linear(prev_dim, action_dim))
         
         self.network = nn.Sequential(*layers)
         
         # Initialize weights
         self.apply(self._init_weights)
+        if self.use_lora:
+            self.freeze_base_parameters()
     
     def _init_weights(self, module):
         """Initialize network weights."""
         if isinstance(module, nn.Linear):
             nn.init.orthogonal_(module.weight, gain=np.sqrt(2))
             nn.init.constant_(module.bias, 0.0)
+
+    def freeze_base_parameters(self):
+        """Freeze base linear layers when LoRA is enabled."""
+        for module in self.modules():
+            if isinstance(module, LoRALinearRank1):
+                module.freeze_base()
+
+    def lora_parameters(self) -> Iterator[nn.Parameter]:
+        """Yield only LoRA parameters."""
+        for module in self.modules():
+            if isinstance(module, LoRALinearRank1):
+                yield module.lora_a
+                yield module.lora_b
+
+    def base_parameters(self) -> Iterator[nn.Parameter]:
+        """Yield only base linear parameters inside LoRA wrappers."""
+        for module in self.modules():
+            if isinstance(module, LoRALinearRank1):
+                yield module.base.weight
+                if module.base.bias is not None:
+                    yield module.base.bias
+
+    def count_lora_parameters(self) -> int:
+        """Count LoRA parameters."""
+        return sum(p.numel() for p in self.lora_parameters())
     
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         """

@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 NOISE_TYPES = ('gaussian', 'cauchy', 'laplace')
+PARAM_MODES = ('all', 'lora')
 
 
 def sample_perturbation(n_params: int, noise_type: str = 'gaussian') -> torch.Tensor:
@@ -125,7 +126,8 @@ def es_gradient_estimate(
     sigma: float = 0.05,
     n_eval_episodes: int = 5,
     max_steps: int = 50,
-    noise_type: str = 'gaussian'
+    noise_type: str = 'gaussian',
+    param_mode: str = 'all'
 ) -> Tuple[torch.Tensor, float, List[float]]:
     """
     Estimate gradient using Evolution Strategies.
@@ -143,6 +145,7 @@ def es_gradient_estimate(
         n_eval_episodes: Episodes per perturbation evaluation
         max_steps: Max steps per episode
         noise_type: Perturbation distribution — 'gaussian', 'cauchy', or 'laplace'
+        param_mode: Parameter subset to optimize — 'all' or 'lora'
     
     Returns:
         gradient: Estimated gradient (flattened parameter vector)
@@ -150,8 +153,11 @@ def es_gradient_estimate(
         fitness_values: List of fitness values for all perturbations
     """
     # Get flattened parameters
-    params = torch.cat([p.flatten() for p in policy.parameters()])
+    target_params = _select_params(policy, param_mode)
+    params = _flatten_params(target_params)
     n_params = params.shape[0]
+    if n_params == 0:
+        raise ValueError(f"No parameters selected with param_mode='{param_mode}'.")
     
     # Storage
     perturbations = []
@@ -167,7 +173,7 @@ def es_gradient_estimate(
         perturbed_params = params + sigma * epsilon
         
         # Set perturbed parameters
-        _set_flat_params(policy, perturbed_params)
+        _set_selected_params(target_params, perturbed_params)
         
         # Evaluate fitness
         fitness = 0.0
@@ -189,7 +195,7 @@ def es_gradient_estimate(
         fitness_values.append(fitness)
     
     # Restore original parameters
-    _set_flat_params(policy, params)
+    _set_selected_params(target_params, params)
     
     # Compute gradient estimate
     fitness_tensor = torch.tensor(fitness_values, dtype=torch.float32)
@@ -222,7 +228,8 @@ def train_es(
     max_steps: int = 50,
     eval_every: int = 10,
     verbose: bool = True,
-    noise_type: str = 'gaussian'
+    noise_type: str = 'gaussian',
+    param_mode: str = 'all'
 ) -> Dict[str, List]:
     """
     Train policy using Evolution Strategies.
@@ -239,12 +246,14 @@ def train_es(
         eval_every: Evaluate policy every N iterations
         verbose: Print progress
         noise_type: Perturbation distribution — 'gaussian', 'cauchy', or 'laplace'
+        param_mode: Parameter subset to optimize — 'all' or 'lora'
     
     Returns:
         history: Dictionary with training history
     """
     # Get flattened parameters
-    params = torch.cat([p.flatten() for p in policy.parameters()])
+    target_params = _select_params(policy, param_mode)
+    params = _flatten_params(target_params)
     
     # Training history
     history = {
@@ -263,12 +272,13 @@ def train_es(
             sigma=sigma,
             n_eval_episodes=n_eval_episodes,
             max_steps=max_steps,
-            noise_type=noise_type
+            noise_type=noise_type,
+            param_mode=param_mode
         )
         
         # Update parameters
         params = params + alpha * gradient
-        _set_flat_params(policy, params)
+        _set_selected_params(target_params, params)
         
         # Logging
         grad_norm = gradient.norm().item()
@@ -361,11 +371,37 @@ def _set_flat_params(model: torch.nn.Module, flat_params: torch.Tensor):
         model: PyTorch model
         flat_params: Flattened parameter tensor
     """
+    _set_selected_params(list(model.parameters()), flat_params)
+
+
+def _flatten_params(params: List[torch.nn.Parameter]) -> torch.Tensor:
+    """Flatten a parameter list into one vector."""
+    if len(params) == 0:
+        return torch.empty(0, dtype=torch.float32)
+    return torch.cat([p.flatten() for p in params])
+
+
+def _set_selected_params(params: List[torch.nn.Parameter], flat_params: torch.Tensor):
+    """Set a selected parameter list from a flattened tensor."""
     offset = 0
-    for param in model.parameters():
+    for param in params:
         numel = param.numel()
         param.data = flat_params[offset:offset+numel].view_as(param).clone()
         offset += numel
+
+
+def _select_params(policy, param_mode: str = 'all') -> List[torch.nn.Parameter]:
+    """Select a parameter subset from policy according to param_mode."""
+    if param_mode not in PARAM_MODES:
+        raise ValueError(f"Unknown param_mode '{param_mode}'. Choose from {PARAM_MODES}.")
+
+    if param_mode == 'all':
+        return list(policy.parameters())
+
+    if not hasattr(policy, 'lora_parameters'):
+        raise ValueError("Policy does not expose lora_parameters() required for param_mode='lora'.")
+
+    return list(policy.lora_parameters())
 
 
 def compute_statistics(

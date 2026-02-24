@@ -143,6 +143,26 @@ class TestPolicyNetwork:
         
         assert logits.shape == (1, 4)
         assert not torch.isnan(logits).any()
+
+    def test_policy_lora_forward_and_freeze(self):
+        """Test LoRA-enabled policy forward pass and base freeze behavior."""
+        policy = PolicyNetwork(
+            state_dim=64,
+            action_dim=4,
+            hidden_dim=32,
+            n_layers=2,
+            use_lora=True,
+            lora_alpha=1.0
+        )
+        state = torch.randn(1, 64)
+
+        logits = policy(state)
+
+        assert logits.shape == (1, 4)
+        assert not torch.isnan(logits).any()
+        assert policy.count_lora_parameters() > 0
+        assert policy.count_lora_parameters() < sum(p.numel() for p in policy.parameters())
+        assert all(not p.requires_grad for p in policy.base_parameters())
     
     def test_policy_action_sampling(self):
         """Test action sampling."""
@@ -259,6 +279,79 @@ class TestESOptimization:
         
         assert not torch.isnan(gradient).any()
         assert not np.isnan(avg_fitness)
+
+    def test_es_lora_only_gradient_shape(self):
+        """Test ES LoRA-only gradient estimation shape."""
+        env = GridWorld(size=4, n_obstacles=0, max_steps=20, seed=42)
+        policy = PolicyNetwork(
+            state_dim=16,
+            action_dim=4,
+            hidden_dim=32,
+            n_layers=2,
+            use_lora=True,
+            lora_alpha=1.0
+        )
+
+        gradient, avg_fitness, fitness_values = es_gradient_estimate(
+            policy, env,
+            N=6,
+            sigma=0.05,
+            n_eval_episodes=2,
+            max_steps=20,
+            param_mode='lora'
+        )
+
+        n_lora_params = policy.count_lora_parameters()
+        assert gradient.shape[0] == n_lora_params
+        assert len(fitness_values) == 6
+        assert isinstance(avg_fitness, float)
+        assert torch.isfinite(gradient).all()
+
+    def test_es_lora_only_updates_only_lora_params(self):
+        """Test LoRA-only ES updates LoRA params while base params remain fixed."""
+        torch.manual_seed(0)
+        np.random.seed(0)
+
+        env = GridWorld(size=4, n_obstacles=0, max_steps=20, seed=42)
+        policy = PolicyNetwork(
+            state_dim=16,
+            action_dim=4,
+            hidden_dim=32,
+            n_layers=2,
+            use_lora=True,
+            lora_alpha=1.0
+        )
+
+        base_before = [p.detach().clone() for p in policy.base_parameters()]
+        lora_params = list(policy.lora_parameters())
+        lora_before = torch.cat([p.detach().flatten().clone() for p in lora_params])
+
+        gradient, _, _ = es_gradient_estimate(
+            policy, env,
+            N=10,
+            sigma=0.05,
+            n_eval_episodes=2,
+            max_steps=20,
+            param_mode='lora'
+        )
+        assert gradient.shape[0] == lora_before.numel()
+        assert torch.isfinite(gradient).all()
+
+        alpha = 0.05
+        lora_after = lora_before + alpha * gradient
+
+        offset = 0
+        for p in lora_params:
+            numel = p.numel()
+            p.data = lora_after[offset:offset + numel].view_as(p).clone()
+            offset += numel
+
+        base_after = [p.detach().clone() for p in policy.base_parameters()]
+        for before, after in zip(base_before, base_after):
+            assert torch.allclose(before, after), "Base parameters changed under LoRA-only update"
+
+        delta = (lora_after - lora_before).abs().sum().item()
+        assert delta > 0, "LoRA parameters did not change after LoRA-only update"
     
     def test_es_improves_policy(self):
         """Test ES improves policy on empty grid."""

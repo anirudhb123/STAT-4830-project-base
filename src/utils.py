@@ -14,7 +14,11 @@ NOISE_TYPES = ('gaussian', 'cauchy', 'laplace')
 PARAM_MODES = ('all', 'lora')
 
 
-def sample_perturbation(n_params: int, noise_type: str = 'gaussian') -> torch.Tensor:
+def sample_perturbation(
+    n_params: int,
+    noise_type: str = 'gaussian',
+    device: Optional[torch.device] = None
+) -> torch.Tensor:
     """
     Sample a perturbation vector from the specified distribution.
 
@@ -29,11 +33,15 @@ def sample_perturbation(n_params: int, noise_type: str = 'gaussian') -> torch.Te
         epsilon: Tensor of shape (n_params,)
     """
     if noise_type == 'gaussian':
-        return torch.randn(n_params)
+        return torch.randn(n_params, device=device)
     elif noise_type == 'cauchy':
-        return torch.distributions.Cauchy(0, 1).sample((n_params,))
+        loc = torch.tensor(0.0, device=device)
+        scale = torch.tensor(1.0, device=device)
+        return torch.distributions.Cauchy(loc, scale).sample((n_params,))
     elif noise_type == 'laplace':
-        return torch.distributions.Laplace(0, 1).sample((n_params,))
+        loc = torch.tensor(0.0, device=device)
+        scale = torch.tensor(1.0, device=device)
+        return torch.distributions.Laplace(loc, scale).sample((n_params,))
     else:
         raise ValueError(
             f"Unknown noise_type '{noise_type}'. Choose from {NOISE_TYPES}."
@@ -155,6 +163,7 @@ def es_gradient_estimate(
     # Get flattened parameters
     target_params = _select_params(policy, param_mode)
     params = _flatten_params(target_params)
+    policy_device = next(policy.parameters()).device
     n_params = params.shape[0]
     if n_params == 0:
         raise ValueError(f"No parameters selected with param_mode='{param_mode}'.")
@@ -166,7 +175,7 @@ def es_gradient_estimate(
     # Sample and evaluate perturbations
     for i in range(N):
         # Sample perturbation from chosen distribution
-        epsilon = sample_perturbation(n_params, noise_type)
+        epsilon = sample_perturbation(n_params, noise_type, device=policy_device)
         perturbations.append(epsilon)
         
         # Perturb parameters
@@ -198,7 +207,11 @@ def es_gradient_estimate(
     _set_selected_params(target_params, params)
     
     # Compute gradient estimate
-    fitness_tensor = torch.tensor(fitness_values, dtype=torch.float32)
+    fitness_tensor = torch.tensor(
+        fitness_values,
+        dtype=torch.float32,
+        device=policy_device
+    )
     perturbations_tensor = torch.stack(perturbations)
     
     # Apply the correct score function for the chosen noise distribution
@@ -386,7 +399,8 @@ def _set_selected_params(params: List[torch.nn.Parameter], flat_params: torch.Te
     offset = 0
     for param in params:
         numel = param.numel()
-        param.data = flat_params[offset:offset+numel].view_as(param).clone()
+        flat_slice = flat_params[offset:offset+numel]
+        param.data = flat_slice.to(device=param.device, dtype=param.dtype).view_as(param).clone()
         offset += numel
 
 

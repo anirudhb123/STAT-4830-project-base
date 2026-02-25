@@ -382,7 +382,8 @@ class PolicyNetwork(nn.Module):
             log_prob: log probability of action (None if deterministic)
         """
         with torch.no_grad():
-            state_tensor = torch.FloatTensor(state)
+            model_device = next(self.parameters()).device
+            state_tensor = torch.tensor(state, dtype=torch.float32, device=model_device)
             if state_tensor.dim() == 1:
                 state_tensor = state_tensor.unsqueeze(0)
             
@@ -395,7 +396,7 @@ class PolicyNetwork(nn.Module):
             else:
                 dist = torch.distributions.Categorical(probs)
                 action = dist.sample().item()
-                log_prob = dist.log_prob(torch.tensor(action))
+                log_prob = dist.log_prob(torch.tensor(action, device=state_tensor.device))
                 return action, log_prob
     
     def get_action_batch(

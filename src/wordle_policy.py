@@ -106,7 +106,8 @@ class WordleDiscretePolicy(nn.Module):
             log_prob: log probability of action (None if deterministic)
         """
         with torch.no_grad():
-            state_tensor = torch.FloatTensor(state_embedding)
+            model_device = next(self.parameters()).device
+            state_tensor = torch.tensor(state_embedding, dtype=torch.float32, device=model_device)
             if state_tensor.dim() == 1:
                 state_tensor = state_tensor.unsqueeze(0)
             
@@ -130,7 +131,7 @@ class WordleDiscretePolicy(nn.Module):
             else:
                 dist = torch.distributions.Categorical(probs)
                 action_idx = dist.sample().item()
-                log_prob = dist.log_prob(torch.tensor(action_idx))
+                log_prob = dist.log_prob(torch.tensor(action_idx, device=state_tensor.device))
                 return action_idx, log_prob
     
     def get_action_word(

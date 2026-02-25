@@ -29,15 +29,15 @@ class RolloutBuffer:
         self.values.append(value)
         self.dones.append(done)
     
-    def get(self):
+    def get(self, device: Optional[torch.device] = None):
         """Convert to tensors."""
         return (
-            torch.FloatTensor(np.array(self.states)),
-            torch.LongTensor(self.actions),
-            torch.FloatTensor(self.rewards),
-            torch.FloatTensor(self.log_probs),
-            torch.FloatTensor(self.values),
-            torch.FloatTensor(self.dones),
+            torch.tensor(np.array(self.states), dtype=torch.float32, device=device),
+            torch.tensor(self.actions, dtype=torch.long, device=device),
+            torch.tensor(self.rewards, dtype=torch.float32, device=device),
+            torch.tensor(self.log_probs, dtype=torch.float32, device=device),
+            torch.tensor(self.values, dtype=torch.float32, device=device),
+            torch.tensor(self.dones, dtype=torch.float32, device=device),
         )
     
     def clear(self):
@@ -67,12 +67,12 @@ def compute_gae(
         returns: (T,)
     """
     T = len(rewards)
-    advantages = torch.zeros(T)
-    last_gae = 0
+    advantages = torch.zeros(T, device=rewards.device, dtype=rewards.dtype)
+    last_gae = torch.tensor(0.0, device=rewards.device, dtype=rewards.dtype)
     
     for t in reversed(range(T)):
         if t == T - 1:
-            next_value = 0.0
+            next_value = torch.tensor(0.0, device=rewards.device, dtype=rewards.dtype)
         else:
             next_value = values[t + 1]
         
@@ -234,7 +234,7 @@ def train_ppo_wordle(
                 
                 # Get action and value
                 with torch.no_grad():
-                    state_tensor = torch.FloatTensor(state_embedding).to(device)
+                    state_tensor = torch.tensor(state_embedding, dtype=torch.float32, device=device)
                     
                     # Get action (word guess) with XML formatting
                     if hasattr(policy, 'format_action_xml'):
@@ -278,10 +278,7 @@ def train_ppo_wordle(
             continue
         
         # Convert buffer to tensors
-        states, actions, rewards, old_log_probs, values, dones = buffer.get()
-        states = states.to(device)
-        actions = actions.to(device)
-        old_log_probs = old_log_probs.to(device)
+        states, actions, rewards, old_log_probs, values, dones = buffer.get(device=device)
         
         # Compute advantages and returns
         advantages, returns = compute_gae(rewards, values, dones, gamma, gae_lambda)
@@ -476,7 +473,7 @@ def train_ppo(
         for step in range(n_steps):
             # Get action and value
             with torch.no_grad():
-                state_tensor = torch.FloatTensor(state).to(device)
+                state_tensor = torch.tensor(state, dtype=torch.float32, device=device)
                 action, log_prob = policy.get_action(state, deterministic=False)
                 value = value_net(state_tensor).item()
             
@@ -484,7 +481,14 @@ def train_ppo(
             next_state, reward, done, info = env.step(action)
             
             # Store transition
-            buffer.add(state, action, reward, log_prob, value, done)
+            buffer.add(
+                state,
+                action,
+                reward,
+                log_prob.item() if log_prob is not None else 0.0,
+                value,
+                done
+            )
             
             episode_reward += reward
             total_steps += 1
@@ -496,10 +500,7 @@ def train_ppo(
                 state = env.reset()
         
         # Convert buffer to tensors
-        states, actions, rewards, old_log_probs, values, dones = buffer.get()
-        states = states.to(device)
-        actions = actions.to(device)
-        old_log_probs = old_log_probs.to(device)
+        states, actions, rewards, old_log_probs, values, dones = buffer.get(device=device)
         
         # Compute advantages and returns
         advantages, returns = compute_gae(rewards, values, dones, gamma, gae_lambda)

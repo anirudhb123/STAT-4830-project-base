@@ -14,7 +14,8 @@ def _set_flat_params(policy, flat_params: torch.Tensor):
     offset = 0
     for param in policy.parameters():
         param_length = param.numel()
-        param.data = flat_params[offset:offset + param_length].view_as(param).clone()
+        param_slice = flat_params[offset:offset + param_length]
+        param.data = param_slice.to(device=param.device, dtype=param.dtype).view_as(param).clone()
         offset += param_length
 
 
@@ -88,6 +89,7 @@ def es_gradient_estimate_wordle(
     """
     # Get flattened parameters
     params = torch.cat([p.flatten() for p in policy.parameters()])
+    policy_device = next(policy.parameters()).device
     n_params = params.shape[0]
     
     # Storage
@@ -97,7 +99,7 @@ def es_gradient_estimate_wordle(
     # Sample and evaluate perturbations
     for i in range(N):
         # Sample perturbation
-        epsilon = torch.randn(n_params)
+        epsilon = torch.randn(n_params, device=policy_device)
         perturbations.append(epsilon)
         
         # Evaluate perturbation
@@ -108,7 +110,7 @@ def es_gradient_estimate_wordle(
     _set_flat_params(policy, params)
     
     # Compute gradient estimate
-    fitness_tensor = torch.tensor(fitness_values, dtype=torch.float32)
+    fitness_tensor = torch.tensor(fitness_values, dtype=torch.float32, device=policy_device)
     perturbations_tensor = torch.stack(perturbations)
     
     # Standardize fitness (improves stability)

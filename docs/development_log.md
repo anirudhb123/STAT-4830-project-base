@@ -82,6 +82,36 @@ Implemented rank-1 LoRA for GridWorld ES in LoRA-only mode (base weights frozen)
 - Matched Week 7 ES sampling budget to Week 4 defaults: **80 iterations, N=50, 5 episodes/perturbation** (kept `sigma=0.10`, `alpha=0.05`, `max_steps=50`)
 - Added `docs/llm_exploration/week7_log.md` to document Week 7 AI-assisted development
 
+### Updates (Feb 26)
+- Refactored Week 7 notebook from single-run LoRA trials into a **paired adaptation protocol**:
+  - Pretrain source policy on baseline GridWorld
+  - Perturb target environment
+  - Continue from the same source checkpoint with both `param_mode='all'` and `param_mode='lora'`
+- Extended `src/utils.py` ES logging with adaptation diagnostics:
+  - `eval_steps`
+  - `fitness_std`
+  - `env_interactions`
+  - `cumulative_env_interactions`
+- Added adaptation metrics and analysis outputs in `notebooks/week7_implementation.ipynb`:
+  - time-to-threshold (`0.6/0.8/0.9`)
+  - interactions-to-threshold
+  - success AUC
+  - final sparse-eval reward/success/steps
+  - CI-based adaptation curves and diagnostic panels
+- Added **CSV exports** for report-ready tables:
+  - `results/es_lora_adaptation_runs.csv`
+  - `results/es_lora_adaptation_summary.csv`
+  - `results/es_lora_adaptation_deltas.csv`
+- Added verbose run-status printing (seed, method, perturbation level, ETA, final metrics) for long CPU experiments.
+- Implemented dynamic pretraining safeguards in notebook utilities:
+  - optional early-stop chunking with max-iteration cap
+  - source-quality gate (`pretrain_success` threshold) before adaptation
+  - explicit skip handling for failed source runs (with `skipped_reason`)
+- Replaced transition-noise perturbation with **curriculum-style layout perturbation**:
+  - local obstacle-cell moves controlled by perturbation level
+  - optional slight goal relocation at higher perturbation levels
+  - updated labels/docs to use layout move fraction instead of transition noise std.
+
 ---
 
 ## Week 5 (Feb 9 - Feb 16, 2026)
@@ -428,4 +458,4 @@ g- Notebook validation & testing: 4 hours
 
 ---
 
-*Log updated: February 25, 2026*
+*Log updated: February 26, 2026*

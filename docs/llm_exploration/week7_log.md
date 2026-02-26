@@ -158,6 +158,55 @@ Budget and metric definitions matter as much as code correctness; otherwise it�
 
 ---
 
+## Session 7: Adaptation Pipeline + Pretrain Gate + Curriculum Perturbations (Feb 26)
+
+### Conversation with Cursor AI
+
+**My Requests:**
+> I want an actual transfer experiment: pretrain ES on source GridWorld, perturb the environment, then continue training both full ES and LoRA-only from the same source policy and compare adaptation speed.
+
+> Add stronger run logging, CSV export, and make sure source pretraining is functional before adaptation (with max-iteration guard + failure handling).
+
+> Transition-noise perturbation is not what I meant; I want the **grid layout itself** perturbed in a curriculum style (small cell moves).
+
+**Response Summary:**
+- Refactored notebook into a paired adaptation protocol:
+  - common pretrained source policy per seed
+  - same perturbed target layout per seed for both methods
+  - direct comparison of `param_mode='all'` vs `param_mode='lora'`
+- Added adaptation metrics aligned to “how quickly”:
+  - time-to-threshold (`0.6`, `0.8`, `0.9`)
+  - interactions-to-threshold
+  - success AUC
+  - final sparse-eval reward/success/steps
+- Added ES logging support in `src/utils.py` for:
+  - `eval_steps`, `fitness_std`, and cumulative interaction counts
+- Added CSV outputs for downstream reporting and plotting:
+  - run-level, summary, and LoRA-minus-full delta tables
+- Added verbose progress printing for long runs:
+  - perturbation level, seed, method, per-run elapsed, ETA, and key metrics
+- Implemented source-model robustness controls:
+  - optional dynamic pretraining with early stop chunks
+  - max-iteration cap
+  - source-quality gate before adaptation
+  - explicit skip rows (`skipped_reason`) if source quality fails
+- Replaced transition perturbation with layout perturbation:
+  - move a controlled fraction of obstacle cells locally
+  - optional slight goal relocation at higher perturbation levels
+  - updated notebook wording/axes to “layout move fraction”
+
+**Key Takeaways:**
+1. For LoRA transfer, quality of pretrained base \(W\) is first-order; explicit gating avoids misleading comparisons.
+2. Layout perturbation better matches curriculum-style environment shift than transition noise.
+3. Adaptation-speed claims are more credible with threshold/interactions/AUC and multi-seed CI curves.
+
+**What I Did:**
+- Updated `notebooks/week7_implementation.ipynb` to run the full transfer experiment with robust logging and export.
+- Updated `src/utils.py` to expose adaptation diagnostics needed for sample-efficiency analysis.
+- Added pretrain failure handling so bad source policies do not silently contaminate adaptation results.
+
+---
+
 ## Key Lessons from LLM Interactions
 
 ### What Worked Well:
@@ -188,15 +237,17 @@ Budget and metric definitions matter as much as code correctness; otherwise it�
 
 ## Impact Assessment
 
-**Time Saved:** ~3–5 hours
+**Time Saved:** ~6–9 hours total across Week 7
 - Faster debugging (pinpointed fitness-variance issue quickly)
-- Faster implementation (porting shaping + notebook updates)
+- Faster implementation (porting shaping + adaptation refactor + exports)
 
 **Quality Improvement:**
-- Week 7 experiments are now closer to a controlled comparison (match Week 4 budget; explicit train-vs-eval reward scheme)
-- Reduced risk of misleading interpretation by clarifying what the plotted curves represent
+- Week 7 now supports a controlled transfer-learning comparison from a shared source checkpoint.
+- Reduced risk of invalid LoRA conclusions by enforcing source-quality checks before adaptation.
+- Improved reproducibility/reporting via explicit CSV outputs and verbose run-level diagnostics.
+- Perturbation design now better matches stated curriculum objective (layout moves, not action slips).
 
 ---
 
-*Log completed: February 25, 2026*
+*Log completed: February 26, 2026*
 

@@ -14,8 +14,8 @@ import numpy as np
 from pathlib import Path
 
 from wordle_env import WordleEnvironmentWrapper, load_wordle_environment
-from wordle_policy import WordleDiscretePolicy, WordleValueNetwork
-from ppo_training import train_ppo_wordle, evaluate_policy
+from wordle_networks import WordleDiscretePolicy, WordleValueNetwork
+from ppo import train_ppo_wordle, evaluate_policy
 
 
 def main():

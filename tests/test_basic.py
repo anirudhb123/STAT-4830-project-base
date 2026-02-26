@@ -14,8 +14,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 import numpy as np
 import torch
 import pytest
-from model import GridWorld, HarderGridWorld, PolicyNetwork, ValueNetwork
-from utils import evaluate_policy, es_gradient_estimate
+from gridworld import GridWorld, HarderGridWorld, PolicyNetwork, ValueNetwork
+from es_gridworld import evaluate_policy, es_gradient_estimate
 
 
 class TestEnvironment:

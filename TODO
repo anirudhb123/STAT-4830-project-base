@@ -1,0 +1,4 @@
+week7_implementation:
+    Didn't do any hyperparemeter tuning
+    Code doesn't really benefit much from GPU so it's slow (might require big changes)
+    

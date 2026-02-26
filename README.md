@@ -63,13 +63,13 @@ Top-level scripts:
 
 `src/` modules:
 
-- `src/__init__.py`: Package exports for the ES/GridWorld code (re-exports core classes/functions from `model.py` and `utils.py`).
-- `src/model.py`: Core GridWorld environments plus generic PyTorch policy/value networks (including optional LoRA adapters).
-- `src/utils.py`: ES utilities (noise sampling, score functions, gradient estimation), evaluation helpers, plotting, and comparison-table/statistics helpers.
-- `src/ppo_training.py`: PPO training loop utilities (rollout buffer, GAE, policy evaluation) with Wordle-specific training support.
+- `src/__init__.py`: Package exports for the ES/GridWorld code (re-exports core classes/functions from `gridworld.py` and `es_gridworld.py`).
+- `src/gridworld.py`: Core GridWorld environments plus generic PyTorch policy/value networks (including optional LoRA adapters).
+- `src/es_gridworld.py`: ES utilities (noise sampling, score functions, gradient estimation), evaluation helpers, plotting, and comparison-table/statistics helpers.
+- `src/ppo.py`: PPO training loop utilities (rollout buffer, GAE, policy evaluation) with Wordle-specific training support.
 - `src/wordle_env.py`: Wordle environment wrapper (Prime Intellect `verifiers` if installed, otherwise mock fallback) + state embedding + word vocabulary/action mapping.
-- `src/wordle_policy.py`: Wordle discrete policy/value networks; produces Wordle guesses (optionally XML-formatted for Prime Intellect) from state embeddings.
-- `src/wordle_es.py`: Evolution Strategies training implementation adapted for the Wordle wrapper/policy.
+- `src/wordle_networks.py`: Wordle discrete policy/value networks; produces Wordle guesses (optionally XML-formatted for Prime Intellect) from state embeddings.
+- `src/es_wordle.py`: Evolution Strategies training implementation adapted for the Wordle wrapper/policy.
 - `src/train_wordle.py`: CLI entrypoint to train a Wordle agent with PPO; handles args, evaluation, and saving model checkpoints.
 
 ## Notes

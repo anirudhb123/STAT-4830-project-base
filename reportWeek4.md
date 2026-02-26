@@ -32,9 +32,9 @@ For the PPO baseline, we implemented a standard PPO-Clip algorithm with Generali
 
 **Implementation strategy.** All code uses PyTorch for network definitions and NumPy for environment logic. The codebase is organized as:
 
-- `src/model.py`: `GridWorld` and `HarderGridWorld` environments, `PolicyNetwork` (state → action probabilities), and `ValueNetwork` (value function approximation)
-- `src/utils.py`: `es_gradient_estimate` (core ES loop), `train_es` (full training pipeline), `evaluate_policy`, `plot_training_curves`, and `compute_statistics`
-- `src/ppo_training.py`: `train_ppo` (PPO training loop), `RolloutBuffer`, and GAE computation
+- `src/gridworld.py`: `GridWorld` and `HarderGridWorld` environments, `PolicyNetwork` (state → action probabilities), and `ValueNetwork` (value function approximation)
+- `src/es_gridworld.py`: `es_gradient_estimate` (core ES loop), `train_es` (full training pipeline), `evaluate_policy`, `plot_training_curves`, and `compute_statistics`
+- `src/ppo.py`: `train_ppo` (PPO training loop), `RolloutBuffer`, and GAE computation
 - `notebooks/week4_implementation.ipynb`: Full working comparison
 
 The `PolicyNetwork` uses orthogonal weight initialization and supports both stochastic and deterministic action selection. A `get_action_batch` method is included to support the PPO training loop. The `ValueNetwork` shares the same 2-layer MLP architecture and is used for PPO's advantage estimation.

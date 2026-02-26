@@ -16,7 +16,7 @@ import torch
 import numpy as np
 
 from wordle_env import WordleEnvironmentWrapper, load_wordle_environment
-from wordle_policy import WordleDiscretePolicy, WordleValueNetwork
+from wordle_networks import WordleDiscretePolicy, WordleValueNetwork
 
 
 def main():
@@ -31,7 +31,7 @@ def main():
         num_eval_examples=5,
         use_prime_intellect=False  # Mock mode
     )
-    print("✓ Environment created")
+    print("[OK] Environment created")
     
     # 2. Create policy
     print("\n[2/5] Creating policy network...")
@@ -41,8 +41,8 @@ def main():
         hidden_dim=128,
         n_layers=3
     ).to(device)
-    print(f"✓ Policy created with {policy.count_parameters():,} parameters")
-    print(f"✓ Vocabulary size: {len(policy.vocab)} words")
+    print(f"[OK] Policy created with {policy.count_parameters():,} parameters")
+    print(f"[OK] Vocabulary size: {len(policy.vocab)} words")
     print(f"  Sample words: {', '.join(policy.vocab.words[:10])}")
     
     # 3. Create value network
@@ -52,25 +52,25 @@ def main():
         hidden_dim=128,
         n_layers=3
     ).to(device)
-    print(f"✓ Value network created with {value_net.count_parameters():,} parameters")
+    print(f"[OK] Value network created with {value_net.count_parameters():,} parameters")
     
     # 4. Test environment interaction
     print("\n[4/5] Testing environment interaction...")
     state = env.reset()
-    print(f"✓ Initial state: turn {state.turn_number}, complete={state.game_complete}")
+    print(f"[OK] Initial state: turn {state.turn_number}, complete={state.game_complete}")
     
     # Get state embedding
     state_embedding = env.get_state_embedding(state)
-    print(f"✓ State embedding shape: {state_embedding.shape}")
+    print(f"[OK] State embedding shape: {state_embedding.shape}")
     
     # Get policy action
     xml_action, log_prob = policy.format_action_xml(state, state_embedding)
-    print(f"✓ Policy generated action")
+    print(f"[OK] Policy generated action")
     print(f"  Action: {xml_action[:80]}...")
     
     # Take step
     next_state, reward, done, info = env.step(xml_action)
-    print(f"✓ Environment step completed")
+    print(f"[OK] Environment step completed")
     print(f"  Reward: {reward:.3f}")
     print(f"  Done: {done}")
     print(f"  Info keys: {list(info.keys())}")
@@ -104,7 +104,7 @@ def main():
             
             print(f"  Turn {turns}: {word} -> reward={reward:.3f}")
     
-    print(f"\n✓ Episode complete!")
+    print(f"\n[OK] Episode complete!")
     print(f"  Total turns: {turns}")
     print(f"  Total reward: {episode_reward:.3f}")
     print(f"  Success: {info.get('correct_answer', 0.0) > 0.5}")

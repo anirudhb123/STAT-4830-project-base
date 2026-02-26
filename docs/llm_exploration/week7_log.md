@@ -207,6 +207,42 @@ Budget and metric definitions matter as much as code correctness; otherwise itâ€
 
 ---
 
+## Session 8: New Adaptation Results from Notebook Exports (Feb 26)
+
+### Conversation with Cursor AI
+
+**My Request:**
+> Summarize the new Week 7 adaptation results from `notebooks/results` and discuss what they mean for the final log.
+
+**Response Summary:**
+- Reviewed the exported result tables from `notebooks/week7_implementation.ipynb`:
+  - `es_lora_adaptation_runs.csv`
+  - `es_lora_adaptation_summary.csv`
+  - `es_lora_adaptation_deltas.csv`
+- Compared full-parameter ES vs LoRA-only ES across perturbation levels.
+- Focused on adaptation-speed metrics (`AUC`, time/interactions to thresholds), not just final success.
+
+**Key Takeaway:**
+The new transfer results are **not great** for LoRA under larger layout shifts: both methods end with high final sparse-eval success, but LoRA often adapts slower at higher perturbation (especially at `perturb_std=0.5`, and still somewhat at `0.75`).
+
+**What I Observed in the Results:**
+- Final metrics alone are misleadingly optimistic:
+  - both methods reach near-perfect final eval success/reward in most settings.
+- Adaptation-speed metrics reveal the weakness:
+  - At `perturb_std=0.5`, LoRA has lower success AUC and much larger interactions-to-0.8 than full ES.
+  - At `perturb_std=0.75`, LoRA remains slower, though the gap is smaller than at `0.5`.
+- At easier shifts (`0.0`, `0.25`), LoRA remains competitive and can match/beat full ES on interactions.
+
+**Important Positive Note (Matches Our Goal):**
+- Even though the adaptation outcome is weaker than hoped, the new plotting/export pipeline produced **less noisy, more stable-looking curves** than earlier Week 7 attempts.
+- With paired seeds, controlled layout perturbations, and run-level logging, variance in the graphs is visibly reduced and trends are easier to interpret.
+- So, while the performance conclusion is mixed-to-negative for LoRA speed under harder shifts, the experiment quality and variance behavior improved in the direction we wanted.
+
+**Important Limitation:**
+- We still have **not** done systematic hyperparameter tuning for this Week 7 transfer setup, so these comparisons should be interpreted as baseline results rather than optimized performance ceilings.
+
+---
+
 ## Key Lessons from LLM Interactions
 
 ### What Worked Well:

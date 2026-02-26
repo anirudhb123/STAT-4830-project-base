@@ -19,7 +19,7 @@ from wordle_env import (
     WordVocabulary,
     load_wordle_environment
 )
-from wordle_policy import WordleDiscretePolicy, WordleValueNetwork
+from wordle_networks import WordleDiscretePolicy, WordleValueNetwork
 
 
 class TestWordVocabulary:

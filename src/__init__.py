@@ -4,14 +4,14 @@ ES for Non-Differentiable RL
 Core implementation of Evolution Strategies for sparse reward reinforcement learning.
 """
 
-from .model import (
+from .gridworld import (
     GridWorld,
     HarderGridWorld,
     PolicyNetwork,
     ValueNetwork
 )
 
-from .utils import (
+from .es_gridworld import (
     NOISE_TYPES,
     sample_perturbation,
     score_function,

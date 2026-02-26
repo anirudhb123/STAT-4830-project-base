@@ -19,9 +19,9 @@ import seaborn as sns
 from pathlib import Path
 
 from wordle_env import load_wordle_environment
-from wordle_policy import WordleDiscretePolicy, WordleValueNetwork
-from wordle_es import train_es_wordle
-from ppo_training import train_ppo_wordle, evaluate_policy
+from wordle_networks import WordleDiscretePolicy, WordleValueNetwork
+from es_wordle import train_es_wordle
+from ppo import train_ppo_wordle, evaluate_policy
 
 # Set plotting style
 sns.set_style("whitegrid")
@@ -45,7 +45,7 @@ def main():
         num_eval_examples=20,
         use_prime_intellect=True  # Use real Prime Intellect
     )
-    print(f"✓ Environment ready")
+    print(f"[OK] Environment ready")
     
     # Train ES
     print("\n[2/4] Training with Evolution Strategies...")
@@ -68,7 +68,7 @@ def main():
         eval_every=5,
         verbose=True
     )
-    print("✓ ES training complete")
+    print("[OK] ES training complete")
     
     # Train PPO
     print("\n[3/4] Training with PPO...")
@@ -100,7 +100,7 @@ def main():
         log_wandb=False,
         seed=42
     )
-    print("✓ PPO training complete")
+    print("[OK] PPO training complete")
     
     # Final evaluation
     print("\n[4/4] Final Evaluation...")
@@ -163,14 +163,14 @@ def main():
     
     plt.tight_layout()
     plt.savefig('figures/wordle_final_comparison.png', dpi=150, bbox_inches='tight')
-    print("✓ Saved figures/wordle_final_comparison.png")
+    print("[OK] Saved figures/wordle_final_comparison.png")
     
     # Save models
     os.makedirs('models', exist_ok=True)
     torch.save(policy_es.state_dict(), 'models/wordle_es_final.pt')
     torch.save(trained_policy_ppo.state_dict(), 'models/wordle_ppo_final.pt')
     torch.save(trained_value.state_dict(), 'models/wordle_value_final.pt')
-    print("✓ Saved models to models/")
+    print("[OK] Saved models to models/")
     
     print("\n" + "=" * 70)
     print(f"Winner by success rate: {'ES' if es_success > ppo_success else 'PPO'}")

@@ -81,7 +81,7 @@ class WordleEnvironmentWrapper:
             
             # Load environment (it takes env_id only, no args)
             self.prime_env = load_environment("wordle")
-            print("✓ Successfully loaded Prime Intellect Wordle environment")
+            print("[OK] Successfully loaded Prime Intellect Wordle environment")
             print(f"  Training examples: {len(self.prime_env.dataset) if hasattr(self.prime_env, 'dataset') else 'N/A'}")
             print(f"  Eval examples: {len(self.prime_env.eval_dataset) if hasattr(self.prime_env, 'eval_dataset') else 'N/A'}")
         except ImportError:
@@ -409,7 +409,7 @@ class WordVocabulary:
                     targets.add(str(target).upper())
             
             words = sorted(list(targets))
-            print(f"✓ Loaded {len(words)} words from Prime Intellect dataset")
+            print(f"[OK] Loaded {len(words)} words from Prime Intellect dataset")
             return words
             
         except Exception as e:

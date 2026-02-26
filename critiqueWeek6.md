@@ -5,7 +5,7 @@
 ### Strengths
 - Clear evolution in problem scope: We moved from GridWorld to Wordle, which is a harder discrete decision problem with meaningful exploration/credit-assignment challenges and a much larger (even if still truncated) action space.
 
-- Working end-to-end Wordle pipeline: The repo now has an environment wrapper (`src/wordle_env.py`), a discrete vocabulary policy + value net (`src/wordle_policy.py`), ES training (`src/wordle_es.py`), and PPO training utilities (`src/ppo_training.py`), and the Week 6 notebook runs both methods and produces saved figures/models.
+- Working end-to-end Wordle pipeline: The repo now has an environment wrapper (`src/wordle_env.py`), a discrete vocabulary policy + value net (`src/wordle_networks.py`), ES training (`src/es_wordle.py`), and PPO training utilities (`src/ppo.py`), and the Week 6 notebook runs both methods and produces saved figures/models.
 
 - Transparent reporting of results: `reportWeek6.md` separates (a) post-training evaluation (50 episodes) from (b) training-time logged metrics, and explicitly calls out the large ES vs PPO episode-budget mismatch.
 

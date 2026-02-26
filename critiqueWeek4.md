@@ -7,7 +7,7 @@
 
 - Working end-to-end comparison (now empirical, not just theoretical): The notebook actually runs a fair ES vs PPO comparison: both train on shaped rewards and are evaluated on sparse rewards only (0/+1). In the shown run, both methods reach 100% success on the sparse evaluation environment.
 
-- Modular code + extensibility: The separation into model.py, ppo_training.py, and utilities supports controlled experiments (swapping envs, reward functions, hyperparams) without refactoring.
+- Modular code + extensibility: The separation into `gridworld.py`, `ppo.py`, and algorithm-specific utilities supports controlled experiments (swapping envs, reward functions, hyperparams) without refactoring.
 
 - Reproducible setup: Fixed seeds and consistent environment settings (8×8, 8 obstacles, max 50 steps) make results easier to replicate and compare.
 

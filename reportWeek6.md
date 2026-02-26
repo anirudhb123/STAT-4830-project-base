@@ -25,9 +25,9 @@ where `partial_answer` is computed from GREEN/YELLOW feedback counts, `length_bo
 - Turn features: normalized turn number, guesses count, and done flag
 - Letter features (52 dims): for each letter A–Z, a “tried” indicator and a “status” value (0.0 / 0.5 / 1.0 for unknown / YELLOW / GREEN)
 
-**Policies (discrete action space).** The Wordle policy (`src/wordle_policy.py`) is a multi-layer MLP mapping the 64-d embedding to logits over the vocabulary. We support masking previously-guessed words and formatting actions as XML via `format_action_xml`. PPO uses a separate value network (`WordleValueNetwork`) with the same embedding input.
+**Policies (discrete action space).** The Wordle policy (`src/wordle_networks.py`) is a multi-layer MLP mapping the 64-d embedding to logits over the vocabulary. We support masking previously-guessed words and formatting actions as XML via `format_action_xml`. PPO uses a separate value network (`WordleValueNetwork`) with the same embedding input.
 
-**Evolution Strategies (ES).** We implement ES for Wordle in `src/wordle_es.py`, estimating a gradient over flattened parameters using Gaussian perturbations:
+**Evolution Strategies (ES).** We implement ES for Wordle in `src/es_wordle.py`, estimating a gradient over flattened parameters using Gaussian perturbations:
 
 ```
 grad_theta J(theta) ≈ (1/(N*sigma)) * sum_i R(theta + sigma*epsilon_i) * epsilon_i
@@ -36,7 +36,7 @@ where epsilon_i ~ Normal(0, I)
 
 We standardize fitness across the population each iteration to reduce estimator variance.
 
-**PPO baseline.** PPO is implemented in `src/ppo_training.py` (`train_ppo_wordle`) with:
+**PPO baseline.** PPO is implemented in `src/ppo.py` (`train_ppo_wordle`) with:
 
 - A rollout buffer (`RolloutBuffer`)
 - GAE (`compute_gae`, with γ=0.99, λ=0.95)

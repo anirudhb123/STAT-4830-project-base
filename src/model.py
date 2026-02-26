@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib
-matplotlib.use('Agg')
+# matplotlib.use('Agg') # 
 import matplotlib.pyplot as plt
 from typing import Tuple, Optional, Iterator
 

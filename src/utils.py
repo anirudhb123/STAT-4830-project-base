@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import seaborn as sns
-from typing import Tuple, Dict, List, Optional
+from typing import Tuple, Dict, List, Optional, Union
 from pathlib import Path
 
 
@@ -135,8 +135,12 @@ def es_gradient_estimate(
     n_eval_episodes: int = 5,
     max_steps: int = 50,
     noise_type: str = 'gaussian',
-    param_mode: str = 'all'
-) -> Tuple[torch.Tensor, float, List[float]]:
+    param_mode: str = 'all',
+    return_metadata: bool = False
+) -> Union[
+    Tuple[torch.Tensor, float, List[float]],
+    Tuple[torch.Tensor, float, List[float], Dict[str, float]]
+]:
     """
     Estimate gradient using Evolution Strategies.
     
@@ -154,11 +158,15 @@ def es_gradient_estimate(
         max_steps: Max steps per episode
         noise_type: Perturbation distribution — 'gaussian', 'cauchy', or 'laplace'
         param_mode: Parameter subset to optimize — 'all' or 'lora'
+        return_metadata: If True, return extra diagnostics
     
     Returns:
         gradient: Estimated gradient (flattened parameter vector)
         avg_fitness: Average fitness across population
         fitness_values: List of fitness values for all perturbations
+        metadata: Optional dict with keys:
+            - fitness_std
+            - env_interactions
     """
     # Get flattened parameters
     target_params = _select_params(policy, param_mode)
@@ -171,6 +179,7 @@ def es_gradient_estimate(
     # Storage
     perturbations = []
     fitness_values = []
+    total_env_interactions = 0
     
     # Sample and evaluate perturbations
     for i in range(N):
@@ -197,6 +206,7 @@ def es_gradient_estimate(
                 state, reward, done, _ = env.step(action)
                 episode_reward += reward
                 steps += 1
+                total_env_interactions += 1
             
             fitness += episode_reward
         
@@ -226,7 +236,14 @@ def es_gradient_estimate(
     
     # Gradient estimate: (1/Nσ) Σ F_i · score(ε_i)
     gradient = (score_weights.T @ fitness_normalized) / (N * sigma)
-    
+
+    if return_metadata:
+        metadata = {
+            'fitness_std': float(fitness_std.item()),
+            'env_interactions': float(total_env_interactions)
+        }
+        return gradient, fitness_tensor.mean().item(), fitness_values, metadata
+
     return gradient, fitness_tensor.mean().item(), fitness_values
 
 
@@ -274,19 +291,26 @@ def train_es(
         'avg_fitness': [],
         'eval_reward': [],
         'eval_success': [],
-        'gradient_norm': []
+        'eval_steps': [],
+        'gradient_norm': [],
+        'fitness_std': [],
+        'env_interactions': [],
+        'cumulative_env_interactions': []
     }
+
+    cumulative_env_interactions = 0.0
     
     for iteration in range(n_iterations):
         # ES gradient step
-        gradient, avg_fitness, fitness_values = es_gradient_estimate(
+        gradient, avg_fitness, fitness_values, grad_meta = es_gradient_estimate(
             policy, env,
             N=N,
             sigma=sigma,
             n_eval_episodes=n_eval_episodes,
             max_steps=max_steps,
             noise_type=noise_type,
-            param_mode=param_mode
+            param_mode=param_mode,
+            return_metadata=True
         )
         
         # Update parameters
@@ -295,10 +319,12 @@ def train_es(
         
         # Logging
         grad_norm = gradient.norm().item()
+        fitness_std = grad_meta['fitness_std']
+        cumulative_env_interactions += grad_meta['env_interactions']
         
         # Periodic evaluation
         if iteration % eval_every == 0 or iteration == n_iterations - 1:
-            eval_reward, eval_success, _ = evaluate_policy(
+            eval_reward, eval_success, eval_steps = evaluate_policy(
                 policy, env,
                 n_episodes=20,
                 max_steps=max_steps,
@@ -309,14 +335,19 @@ def train_es(
             history['avg_fitness'].append(avg_fitness)
             history['eval_reward'].append(eval_reward)
             history['eval_success'].append(eval_success)
+            history['eval_steps'].append(eval_steps)
             history['gradient_norm'].append(grad_norm)
+            history['fitness_std'].append(fitness_std)
+            history['env_interactions'].append(grad_meta['env_interactions'])
+            history['cumulative_env_interactions'].append(cumulative_env_interactions)
             
             if verbosity > 0 and (iteration % verbosity == 0 or iteration == n_iterations - 1):
                 print(f"Iter {iteration:4d}/{n_iterations:4d} | "
                       f"Fitness: {avg_fitness:6.3f} | "
                       f"Eval Reward: {eval_reward:6.3f} | "
                       f"Success: {eval_success:.2%} | "
-                      f"Grad Norm: {grad_norm:.4f}")
+                      f"Grad Norm: {grad_norm:.4f} | "
+                      f"Fit Std: {fitness_std:.3f}")
     
     return history
 

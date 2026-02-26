@@ -1,4 +1,14 @@
 week7_implementation:
     Didn't do any hyperparemeter tuning
     Code doesn't really benefit much from GPU so it's slow (might require big changes)
-    
+
+    Ran LoRA with a random W matrix and (W + alpha ab^T) still worked even for rank 1.
+    surely this means that it will work properly so now its time to test it better.
+    Trying to implement the curriculum learning idea but the agent did it wrong the first time.
+    I ran it (took ~160 mins) for gaussian noise comparing LoRA vs normal updating on a changed
+     environment. here W is pretrained on the non-changed environment (using ES). ran on 3 seeds.
+    The issue was that the agent decided to change the seed entirely rather than perturbing the 
+    environment. Even then, graphs showed that LoRA significantly reduced fitness variance when
+    compared to updating like normal which ig is the whole point so its good we arent seeing the opposite.
+    now we need to run it all again on the correct thing, but it's worth sifting through the code 
+    manually to make sure it all looks alr

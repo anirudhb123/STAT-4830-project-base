@@ -1,0 +1,5 @@
+perturb_std,delta_final_success_lora_minus_full,delta_auc_lora_minus_full,delta_time_to_0_8_lora_minus_full,delta_interactions_to_0_8_lora_minus_full,lora_valid_runs,full_valid_runs,delta_excludes_skipped
+0.0,0.0,0.0,0.0,-949.3333333333335,3,3,1
+0.25,0.0,0.0,0.0,-1711.333333333333,3,3,1
+0.5,0.0,-0.26371308016877637,25.0,279715.0,3,3,1
+0.75,0.0,-0.07383966244725748,5.0,36836.99999999999,3,3,1

@@ -311,7 +311,7 @@ def train_es(
             history['eval_success'].append(eval_success)
             history['gradient_norm'].append(grad_norm)
             
-            if verbosity > 0 and iteration % verbosity == 0:
+            if verbosity > 0 and (iteration % verbosity == 0 or iteration == n_iterations - 1):
                 print(f"Iter {iteration:4d}/{n_iterations:4d} | "
                       f"Fitness: {avg_fitness:6.3f} | "
                       f"Eval Reward: {eval_reward:6.3f} | "

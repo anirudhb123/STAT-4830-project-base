@@ -51,6 +51,16 @@ If ES operates over flattened parameters, you need an explicit parameter-selecti
   - LoRA-only (rank-1) ES search parameters: **324**
   - Compression factor in ES search space: **27.48×**
 
+### Caveat: “Frozen random base \(W\)” is atypical LoRA
+
+- **What classic LoRA assumes**: \(W\) is a *pretrained* weight matrix (useful features) that we freeze, and we learn a small low-rank \(\Delta W\) to adapt it.
+- **What we currently do in this project**: when `use_lora=True`, each `LoRALinearRankK` constructs an `nn.Linear` base layer whose weights are randomly initialized (orthogonal init via `PolicyNetwork.apply(self._init_weights)`), and then we freeze `base.weight` / `base.bias`. ES then perturbs/updates only `lora_a` and `lora_b` (when `param_mode='lora'`).
+- **Why this can be a bad idea**: freezing a randomly initialized backbone often makes learning less sample-efficient and undermines the main motivation of LoRA (parameter-efficient *adaptation* of a strong base model). Functionally, this is closer to “fixed random features + a low-rank correction” than standard LoRA-on-pretrained.
+- **Empirical note (important)**: despite the random frozen \(W\), LoRA-ES *did* work in our GridWorld runs (achieved high success once reward shaping was used), so this approach may still be promising for future attempts.
+- **Better alternatives (if we want LoRA to be conceptually clean)**:
+  - Pretrain the base policy normally (e.g., ES with `param_mode='all'` or gradient-based RL), then enable LoRA and freeze the pretrained base for adaptation.
+  - Or, don’t freeze the base (train \(W\) alongside LoRA) if the goal is simply to reduce dimensionality *somewhat* without relying on a pretrained backbone.
+
 ---
 
 ## Session 3: Running Week 7 Notebook — “Nothing Happens” (Feb 14)

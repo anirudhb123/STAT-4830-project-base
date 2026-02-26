@@ -70,6 +70,18 @@ Implemented rank-1 LoRA for GridWorld ES in LoRA-only mode (base weights frozen)
 - Implemented rank-1 LoRA wrappers and LoRA-only ES parameter selection
 - Added regression tests and created Week 7 notebook comparison across all noise types
 
+**ChatGPT (Feb 25):**
+- Diagnosed the “0 progress” failure mode as **sparse rewards → low fitness variance → fitness standardization → near-zero ES update**
+- Recommended training-time reward shaping while keeping sparse evaluation for fair reporting
+
+**Cursor (Feb 25):**
+- Updated Week 7 notebook to train on Week 4-style shaped rewards and match Week 4 ES sampling budget
+
+### Updates (Feb 25)
+- Added Week 4-style distance-based reward shaping to `notebooks/week7_implementation.ipynb` for **training** (`ShapedRewardEnvComparison`), while keeping **sparse** `GridWorld` for evaluation metrics
+- Matched Week 7 ES sampling budget to Week 4 defaults: **80 iterations, N=50, 5 episodes/perturbation** (kept `sigma=0.10`, `alpha=0.05`, `max_steps=50`)
+- Added `docs/llm_exploration/week7_log.md` to document Week 7 AI-assisted development
+
 ---
 
 ## Week 5 (Feb 9 - Feb 16, 2026)
@@ -416,4 +428,4 @@ g- Notebook validation & testing: 4 hours
 
 ---
 
-*Log updated: February 24, 2026*
+*Log updated: February 25, 2026*

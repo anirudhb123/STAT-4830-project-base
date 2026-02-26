@@ -240,7 +240,7 @@ def train_es(
     n_eval_episodes: int = 5,
     max_steps: int = 50,
     eval_every: int = 10,
-    verbose: bool = True,
+    verbosity: int = 0,
     noise_type: str = 'gaussian',
     param_mode: str = 'all'
 ) -> Dict[str, List]:
@@ -257,7 +257,7 @@ def train_es(
         n_eval_episodes: Episodes per fitness evaluation
         max_steps: Max steps per episode
         eval_every: Evaluate policy every N iterations
-        verbose: Print progress
+        verbosity: Print progress every verbosity iterations (0 means no progress printing)
         noise_type: Perturbation distribution — 'gaussian', 'cauchy', or 'laplace'
         param_mode: Parameter subset to optimize — 'all' or 'lora'
     
@@ -311,8 +311,8 @@ def train_es(
             history['eval_success'].append(eval_success)
             history['gradient_norm'].append(grad_norm)
             
-            if verbose:
-                print(f"Iter {iteration:4d} | "
+            if verbosity > 0 and iteration % verbosity == 0:
+                print(f"Iter {iteration:4d}/{n_iterations:4d} | "
                       f"Fitness: {avg_fitness:6.3f} | "
                       f"Eval Reward: {eval_reward:6.3f} | "
                       f"Success: {eval_success:.2%} | "

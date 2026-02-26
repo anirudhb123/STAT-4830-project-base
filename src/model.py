@@ -225,18 +225,32 @@ class HarderGridWorld(GridWorld):
 # POLICY AND VALUE NETWORKS
 # ============================================================================
 
-class LoRALinearRank1(nn.Module):
+#TODO: consider changing LoRA hyperparameters to alpha/r
+class LoRALinearRankK(nn.Module):
     """
-    Rank-1 LoRA wrapper around a linear projection.
+    Rank-\(K\) LoRA wrapper around `nn.Linear`.
 
-    Effective weight: W' = W + alpha * (b @ a^T)
-    where a is (in_features,) and b is (out_features,).
+    PyTorch stores `nn.Linear` weights as \(W \in \mathbb{R}^{\text{out}\times\text{in}}\)
+    and computes \(y = x W^\top + \text{bias}\).
+
+    This module adds a low-rank update using factors:
+    - \(A \in \mathbb{R}^{\text{in}\times K}\) (`lora_a`)
+    - \(B \in \mathbb{R}^{\text{out}\times K}\) (`lora_b`)
+
+    Effective weight:
+        \(W_{\text{eff}} = W + \alpha (B A^\top)\)
+
+    Implemented forward:
+        `base(x) + alpha * (x @ A @ B.T)`
+
+    `lora_b` is initialized to zeros so the adapter starts as a no-op.
     """
 
     def __init__(
         self,
         in_features: int,
         out_features: int,
+        rank: int = 1,
         bias: bool = True,
         alpha: float = 1.0,
         init_scale: float = 1e-3
@@ -244,15 +258,15 @@ class LoRALinearRank1(nn.Module):
         super().__init__()
         self.base = nn.Linear(in_features, out_features, bias=bias)
         self.alpha = alpha
+        self.rank = rank
 
-        # Rank-1 factors. Small init keeps the adapter near zero at startup.
-        self.lora_a = nn.Parameter(torch.randn(in_features) * init_scale)
-        self.lora_b = nn.Parameter(torch.zeros(out_features))
+        # Rank-K factors. Small init keeps the adapter near zero at startup.
+        self.lora_a = nn.Parameter(torch.randn(in_features, rank) * init_scale)
+        self.lora_b = nn.Parameter(torch.zeros(out_features, rank))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         base_out = self.base(x)
-        scalar_proj = x @ self.lora_a
-        delta = scalar_proj.unsqueeze(-1) * self.lora_b
+        delta = (x @ self.lora_a) @ self.lora_b.transpose(1, 0)
         return base_out + self.alpha * delta
 
     def freeze_base(self):
@@ -275,6 +289,7 @@ class PolicyNetwork(nn.Module):
         hidden_dim: int = 64,
         n_layers: int = 2,
         use_lora: bool = False,
+        lora_rank: int = 1,
         lora_alpha: float = 1.0,
         lora_init_scale: float = 1e-3
     ):
@@ -288,11 +303,12 @@ class PolicyNetwork(nn.Module):
         prev_dim = state_dim
         for i in range(n_layers):
             if use_lora:
-                layers.append(LoRALinearRank1(
+                layers.append(LoRALinearRankK(
                     prev_dim,
                     hidden_dim,
                     alpha=lora_alpha,
-                    init_scale=lora_init_scale
+                    init_scale=lora_init_scale,
+                    rank=lora_rank
                 ))
             else:
                 layers.append(nn.Linear(prev_dim, hidden_dim))
@@ -301,11 +317,12 @@ class PolicyNetwork(nn.Module):
         
         # Output layer
         if use_lora:
-            layers.append(LoRALinearRank1(
+            layers.append(LoRALinearRankK(
                 prev_dim,
                 action_dim,
                 alpha=lora_alpha,
-                init_scale=lora_init_scale
+                init_scale=lora_init_scale,
+                rank=lora_rank
             ))
         else:
             layers.append(nn.Linear(prev_dim, action_dim))
@@ -326,20 +343,20 @@ class PolicyNetwork(nn.Module):
     def freeze_base_parameters(self):
         """Freeze base linear layers when LoRA is enabled."""
         for module in self.modules():
-            if isinstance(module, LoRALinearRank1):
+            if isinstance(module, LoRALinearRankK):
                 module.freeze_base()
 
     def lora_parameters(self) -> Iterator[nn.Parameter]:
         """Yield only LoRA parameters."""
         for module in self.modules():
-            if isinstance(module, LoRALinearRank1):
+            if isinstance(module, LoRALinearRankK):
                 yield module.lora_a
                 yield module.lora_b
 
     def base_parameters(self) -> Iterator[nn.Parameter]:
         """Yield only base linear parameters inside LoRA wrappers."""
         for module in self.modules():
-            if isinstance(module, LoRALinearRank1):
+            if isinstance(module, LoRALinearRankK):
                 yield module.base.weight
                 if module.base.bias is not None:
                     yield module.base.bias

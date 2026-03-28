@@ -8,7 +8,7 @@
 
 **How will we measure success?** We follow the metrics printed by `train_es_wordle` in `notebooks/week10_implementation.ipynb`: periodic evaluation gives **success rate** (fraction of eval episodes solved within six turns), **average reward**, and **average turns**. The logger also reports **ES_win**, the average win rate across the **perturbed** policies evaluated in each ES iteration, plus training diagnostics such as mean fitness, gradient norm, and parameter drift. The notebook plots eval curves on the iterations where evaluation runs and overlays per-iteration training statistics on the full ES horizon.
 
-**Constraints and risks.** Forward passes through DistilGPT-2 dominate runtime; **CPU** training is workable but slow when `N_POP` and the number of ES iterations are large. The default configuration in the notebook uses a **mock** Wordle wrapper and restricts both **secrets** and **legal guesses** to the same **eight** words (`MOCK_WORDLE_TARGETS`), which makes the task easier than Week 6 but gives a clean signal that the pipeline is behaving (when trying this on the full Wordle dataset of ~2k words we saw no learning even with a warm start). Moving back to the full Prime-style environment while keeping a small action set would require either enlarging the vocabulary to cover dataset targets or restricting which episodes are sampled.
+**Constraints and risks.** Forward passes through DistilGPT-2 dominate runtime; **CPU** training is workable but slow when `N_POP` and the number of ES iterations are large. The default configuration in the notebook uses a **mock** Wordle wrapper and restricts both **secrets** and **legal guesses** to the same **eight** words (`MOCK_WORDLE_TARGETS`), which makes the task easier than Week 6 but gives a clean signal that the pipeline is behaving (when we tried a large verifier vocabulary without aligning secrets to the policy’s action list, we saw little learning even with warm-start). Moving back to the full Prime-style environment while keeping a small action set would require either enlarging the vocabulary to cover dataset targets or restricting which episodes are sampled.
 
 ## Technical Approach
 
@@ -33,13 +33,15 @@ Here `R` stands in for whatever scalar fitness we assign to each perturbation (m
 | Setting | `TRAIN_BUDGET="long"` | `TRAIN_BUDGET="fast"` |
 | ------- | --------------------- | --------------------- |
 | `MAX_VOCAB` | 8 (= `len(MOCK_WORDLE_TARGETS)`) | same when mock |
-| ES population / iters | `N_POP=16`, `N_ITERATIONS=10` | `N_POP=8`, `N_ITERATIONS=40` |
+| ES population / iters | `N_POP=16`, `N_ITERATIONS=10` | `N_POP=8`, `N_ITERATIONS=5` |
 | `SIGMA` / `ALPHA` | 0.02 / 0.12 | same |
 | Fitness | `FITNESS_OBJECTIVE="win_plus_return"`, `WIN_FITNESS_SCALE=8.0` | same |
 | `RANK_FITNESS` / `NORMALIZE_GRADIENT` | both `True` | same |
 | Rollouts per ES member | `n_eval_episodes=2` | `1` |
 | Logging eval | `EVAL_EVERY=10`, `EVAL_N_EPISODES=24`, `EVAL_DETERMINISTIC=True` | `EVAL_N_EPISODES=16` |
 | Warm-start | `WARM_START_STEPS=400`, `WARM_START_LR=3e-4` | 200 steps |
+
+`long` uses **more** ES iterations (10 vs 5) and **more work per iteration** (larger population, extra rollout per member, longer warm-start). Increase `N_ITERATIONS` in the hyperparameter cell when you want a longer run.
 
 Other toggles in the same cell include `MODEL_NAME` (default **distilgpt2**), `USE_LORA=False`, `RICHER_PROMPT=True`, and `USE_PRIME_TARGETS=False` for the common-word vocabulary builder. Setting `MOCK_ENV=False` switches to Prime loading in the wrapper and uses `MAX_VOCAB` 64 (long) or 256 (fast) unless you change the cell—you then need secrets and actions aligned, as in the problem statement above.
 

@@ -30,20 +30,20 @@ Here `R` stands in for whatever scalar fitness we assign to each perturbation (m
 **Experimental configuration (from `notebooks/week10_implementation.ipynb`).** The hyperparameter cell is the source of truth; the table matches the **mock, `MOCK_ENV=True`** path as of the current notebook.
 
 
-| Setting | `TRAIN_BUDGET="long"` | `TRAIN_BUDGET="fast"` |
-| ------- | --------------------- | --------------------- |
-| `MAX_VOCAB` | 8 (= `len(MOCK_WORDLE_TARGETS)`) | same when mock |
-| ES population / iters | `N_POP=16`, `N_ITERATIONS=10` | `N_POP=8`, `N_ITERATIONS=5` |
-| `SIGMA` / `ALPHA` | 0.02 / 0.12 | same |
-| Fitness | `FITNESS_OBJECTIVE="win_plus_return"`, `WIN_FITNESS_SCALE=8.0` | same |
-| `RANK_FITNESS` / `NORMALIZE_GRADIENT` | both `True` | same |
-| Rollouts per ES member | `n_eval_episodes=2` | `1` |
-| Logging eval | `EVAL_EVERY=10`, `EVAL_N_EPISODES=24`, `EVAL_DETERMINISTIC=True` | `EVAL_N_EPISODES=16` |
-| Warm-start | `WARM_START_STEPS=400`, `WARM_START_LR=3e-4` | 200 steps |
+| Setting | Value (mock `MOCK_ENV=True` in template) |
+| ------- | ------------------------------------------ |
+| `MAX_VOCAB` | 8 (= `len(MOCK_WORDLE_TARGETS)`) |
+| ES | `N_POP=16`, `N_ITERATIONS=10` |
+| `SIGMA` / `ALPHA` | 0.02 / 0.12 |
+| Fitness | `FITNESS_OBJECTIVE="win_plus_return"`, `WIN_FITNESS_SCALE=8.0` |
+| `RANK_FITNESS` / `NORMALIZE_GRADIENT` | both `True` |
+| Rollouts per ES member | `n_eval_episodes=2` |
+| Logging eval | `EVAL_EVERY=10`, `EVAL_N_EPISODES=24`, `EVAL_DETERMINISTIC=True` |
+| Warm-start | `WARM_START_STEPS=400`, `WARM_START_LR=3e-4` |
 
-`long` uses **more** ES iterations (10 vs 5) and **more work per iteration** (larger population, extra rollout per member, longer warm-start). Increase `N_ITERATIONS` in the hyperparameter cell when you want a longer run.
+Increase `N_ITERATIONS`, `N_POP`, or warm-start steps in the hyperparameter cell when you want a heavier run.
 
-Other toggles in the same cell include `MODEL_NAME` (default **distilgpt2**), `USE_LORA=False`, `RICHER_PROMPT=True`, and `USE_PRIME_TARGETS=False` for the common-word vocabulary builder. Setting `MOCK_ENV=False` switches to Prime loading in the wrapper and uses `MAX_VOCAB` 64 (long) or 256 (fast) unless you change the cell—you then need secrets and actions aligned, as in the problem statement above.
+Other toggles in the same cell include `MODEL_NAME` (default **distilgpt2**), `USE_LORA=False`, `RICHER_PROMPT=True`, and `USE_PRIME_TARGETS=False` for the common-word vocabulary builder. Setting `MOCK_ENV=False` switches to Prime loading in the wrapper and uses `MAX_VOCAB` **64** in the template unless you change the cell—you then need secrets and actions aligned, as in the problem statement above.
 
 Code and artifacts:
 

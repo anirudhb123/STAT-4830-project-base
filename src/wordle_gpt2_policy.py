@@ -1,7 +1,7 @@
 """
-Wordle policy using a frozen pretrained GPT-2–style model (e.g. DistilGPT-2) plus a
-trainable linear head over a fixed 5-letter vocabulary. Intended for Evolution Strategies
-on the head only while the transformer stays fixed.
+Wordle policy using a pretrained GPT-2–style model (e.g. GPT-2 / DistilGPT-2) plus a
+trainable linear head over a fixed 5-letter vocabulary. Optional PEFT LoRA on the last
+transformer blocks; otherwise the backbone is frozen and only the head is trained (e.g. ES).
 """
 
 from __future__ import annotations
@@ -14,8 +14,10 @@ from typing import List, Optional, Tuple
 
 try:
     from .wordle_env import WordVocabulary, WordleState, MOCK_WORDLE_TARGETS
+    from .wordle_hints import build_constraint_summary
 except ImportError:
     from wordle_env import WordVocabulary, WordleState, MOCK_WORDLE_TARGETS
+    from wordle_hints import build_constraint_summary
 
 
 def _words_with_priority(
@@ -50,8 +52,14 @@ except ImportError:
     AutoModel = None  # type: ignore
     AutoTokenizer = None  # type: ignore
 
+try:
+    from peft import LoraConfig, get_peft_model
+    PEFT_AVAILABLE = True
+except ImportError:
+    PEFT_AVAILABLE = False
 
-def _build_wordle_prompt(state: WordleState) -> str:
+
+def _build_wordle_prompt(state: WordleState, richer_prompt: bool = True) -> str:
     """Turn game state into a short natural-language prompt for the LM."""
     lines = [
         "You are playing Wordle. Guess a valid 5-letter English word.",
@@ -61,6 +69,10 @@ def _build_wordle_prompt(state: WordleState) -> str:
         lines.append("Previous guesses and feedback:")
         for g, fb in zip(state.previous_guesses, state.feedback_history):
             lines.append(f"- {g}: {fb}")
+        if richer_prompt:
+            hint = build_constraint_summary(state.previous_guesses, state.feedback_history)
+            if hint:
+                lines.append(hint)
     else:
         lines.append("No guesses yet. Choose a strong opening word.")
     lines.append("Reply with exactly one 5-letter uppercase word as your next guess.")
@@ -69,7 +81,9 @@ def _build_wordle_prompt(state: WordleState) -> str:
 
 class WordleGPT2Policy(nn.Module):
     """
-    Frozen GPT-2 / DistilGPT-2 encoder + trainable logits head over a vocabulary subset.
+    GPT-2 / DistilGPT-2 encoder + trainable logits head over a vocabulary subset.
+    Optional LoRA on the last few transformer blocks (`use_lora=True`); otherwise the
+    backbone is frozen.
 
     `state_embedding` arguments in `get_action` / `format_action_xml` are ignored; the
     model conditions on `WordleState` via the text prompt (same information as the env).
@@ -83,12 +97,18 @@ class WordleGPT2Policy(nn.Module):
         max_prompt_length: int = 256,
         include_mock_targets_in_vocab: bool = True,
         extra_priority_words: Optional[List[str]] = None,
+        richer_prompt: bool = True,
+        use_lora: bool = False,
+        lora_r: int = 4,
+        lora_alpha: float = 16.0,
     ):
         super().__init__()
         if not TRANSFORMERS_AVAILABLE:
             raise ImportError(
                 "wordle_gpt2_policy requires `transformers`. Install with: pip install transformers"
             )
+        if use_lora and not PEFT_AVAILABLE:
+            raise ImportError("LoRA requires `peft`. Install with: pip install peft")
 
         full_vocab = WordVocabulary(use_prime_targets=use_prime_targets)
         priority: List[str] = []
@@ -105,29 +125,39 @@ class WordleGPT2Policy(nn.Module):
         # Alias for code that expects `policy.vocab`
         self.vocab = full_vocab
 
+        self.richer_prompt = richer_prompt
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.lm = AutoModel.from_pretrained(model_name)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        for p in self.lm.parameters():
-            p.requires_grad = False
-        self.lm.eval()
+        self._lm_trainable = False
+        if use_lora:
+            # LoRA on all blocks' c_attn / c_proj (Conv1D). layers_to_transform is omitted
+            # because several PEFT + GPT-2 builds fail to match targets when it is set.
+            peft_config = LoraConfig(
+                r=lora_r,
+                lora_alpha=int(lora_alpha),
+                target_modules=["c_attn", "c_proj"],
+                lora_dropout=0.05,
+                bias="none",
+            )
+            self.lm = get_peft_model(self.lm, peft_config)
+            self._lm_trainable = True
+        else:
+            for p in self.lm.parameters():
+                p.requires_grad = False
 
-        hidden = self.lm.config.hidden_size
+        hidden = int(getattr(self.lm.config, "hidden_size", getattr(self.lm.config, "dim", 768)))
         self.head = nn.Linear(hidden, self.action_dim)
         self.max_prompt_length = max_prompt_length
         self._model_name = model_name
 
-        self.apply(self._init_head)
-
-    def _init_head(self, module: nn.Module) -> None:
-        if isinstance(module, nn.Linear):
-            nn.init.orthogonal_(module.weight, gain=0.01)
-            nn.init.zeros_(module.bias)
+        nn.init.orthogonal_(self.head.weight, gain=0.01)
+        nn.init.zeros_(self.head.bias)
 
     def encode_prompt(self, state: WordleState) -> dict:
-        text = _build_wordle_prompt(state)
+        text = _build_wordle_prompt(state, richer_prompt=self.richer_prompt)
         enc = self.tokenizer(
             text,
             return_tensors="pt",
@@ -145,8 +175,11 @@ class WordleGPT2Policy(nn.Module):
         if attn is not None:
             attn = attn.to(device)
 
-        with torch.no_grad():
+        if self._lm_trainable:
             out = self.lm(input_ids=input_ids, attention_mask=attn)
+        else:
+            with torch.no_grad():
+                out = self.lm(input_ids=input_ids, attention_mask=attn)
         # Last non-padding position for the single sequence
         if attn is not None:
             seq_lens = attn.sum(dim=1).long() - 1

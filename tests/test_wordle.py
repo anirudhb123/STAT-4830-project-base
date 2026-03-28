@@ -20,8 +20,17 @@ from wordle_env import (
     load_wordle_environment,
     MOCK_WORDLE_TARGETS,
 )
+from wordle_hints import build_constraint_summary
 from wordle_networks import WordleDiscretePolicy, WordleValueNetwork
 from wordle_gpt2_policy import WordleGPT2Policy, TRANSFORMERS_AVAILABLE
+
+
+class TestWordleHints:
+    def test_constraint_summary_basic(self):
+        g = ["SLATE"]
+        fb = ["S:GRAY L:GRAY A:YELLOW T:GRAY E:GRAY"]
+        s = build_constraint_summary(g, fb)
+        assert "A" in s or "YELLOW" in s or "?" in s
 
 
 class TestWordVocabulary:
@@ -250,6 +259,21 @@ class TestWordleGPT2Policy:
         )
         for w in MOCK_WORDLE_TARGETS:
             assert w in policy.words
+
+    def test_supervised_warm_start_runs(self):
+        pytest.importorskip("transformers")
+        from wordle_gpt2_warmstart import supervised_warm_start_wordle
+
+        env = WordleEnvironmentWrapper(num_episodes=5, max_turns=6)
+        policy = WordleGPT2Policy(
+            use_prime_targets=False,
+            max_vocab_size=64,
+            use_lora=False,
+        )
+        out = supervised_warm_start_wordle(
+            policy, env, n_steps=2, lr=1e-2, verbose=False, min_random_guesses=1, max_random_guesses=2
+        )
+        assert len(out["loss"]) >= 1
 
 
 class TestIntegration:

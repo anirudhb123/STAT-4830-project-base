@@ -215,7 +215,7 @@ def train_es_wordle(
         _set_flat_params(policy, params)
         step_norm = update.norm().item()
         
-        # Periodic evaluation
+        # Periodic evaluation (full rollout stats; slow when eval_n_episodes is large)
         if iteration % eval_every == 0 or iteration == n_iterations - 1:
             # Evaluate on environment
             eval_rewards = []
@@ -274,5 +274,11 @@ def train_es_wordle(
                     f"Grad‖: {grad_norm:.2f} | "
                     f"Step‖: {step_norm:.4f}"
                 )
+        elif verbose:
+            # ES-only iterations used to print nothing until the next eval_every — confusing on slow CPU
+            print(
+                f"Iter {iteration:4d} | Fitness: {avg_fitness:6.3f} | "
+                f"Grad‖: {grad_norm:.2f} | Step‖: {step_norm:.4f} | (no eval)"
+            )
     
     return history

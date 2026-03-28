@@ -8,7 +8,7 @@
 
 **How will we measure success?** We follow the metrics printed by `train_es_wordle` in `notebooks/week10_implementation.ipynb`: periodic evaluation gives **success rate** (fraction of eval episodes solved within six turns), **average reward**, and **average turns**. The logger also reports **ES_win**, the average win rate across the **perturbed** policies evaluated in each ES iteration, plus training diagnostics such as mean fitness, gradient norm, and parameter drift. The notebook plots eval curves on the iterations where evaluation runs and overlays per-iteration training statistics on the full ES horizon.
 
-**Constraints and risks.** Forward passes through DistilGPT-2 dominate runtime; **CPU** training is workable but slow when `N_POP` and the number of ES iterations are large. The default configuration in the notebook uses a **mock** Wordle wrapper and restricts both **secrets** and **legal guesses** to the same **eight** words (`MOCK_WORDLE_TARGETS`), which makes the task easier than Week 6 but gives a clean signal that the pipeline is behaving. Moving back to the full Prime-style environment while keeping a small action set would require either enlarging the vocabulary to cover dataset targets or restricting which episodes are sampled.
+**Constraints and risks.** Forward passes through DistilGPT-2 dominate runtime; **CPU** training is workable but slow when `N_POP` and the number of ES iterations are large. The default configuration in the notebook uses a **mock** Wordle wrapper and restricts both **secrets** and **legal guesses** to the same **eight** words (`MOCK_WORDLE_TARGETS`), which makes the task easier than Week 6 but gives a clean signal that the pipeline is behaving (when trying this on the full Wordle dataset of ~2k words we saw no learning even with a warm start). Moving back to the full Prime-style environment while keeping a small action set would require either enlarging the vocabulary to cover dataset targets or restricting which episodes are sampled.
 
 ## Technical Approach
 
@@ -25,20 +25,23 @@ grad_theta J(theta) ≈ (1/(N*sigma)) * sum_i R(theta + sigma*epsilon_i) * epsil
 where epsilon_i ~ Normal(0, I)
 ```
 
-Here `R` denotes fitness for the perturbed weights (episode return, win rate, or a win-plus-return mix). We can **rank-transform** fitness across the population and apply a **normalized** gradient step when the head dimension is large.
+Here `R` stands in for whatever scalar fitness we assign to each perturbation (mean return, win rate, or **win-plus-return** with a scale on wins). In code, those values are **z-scored or rank-normalized** across the population before they are combined with the noise vectors `epsilon_i`. We can also use a **normalized** parameter update (`normalize_gradient=True` in the notebook).
 
-**Experimental configuration (from `notebooks/week10_implementation.ipynb`).**
+**Experimental configuration (from `notebooks/week10_implementation.ipynb`).** The hyperparameter cell is the source of truth; the table matches the **mock, `MOCK_ENV=True`** path as of the current notebook.
 
 
-| Setting | Mock “long” budget (illustrative) |
-| ------- | ---------------------------------- |
-| Model | distilgpt2; head trained with ES; LoRA off by default |
-| Vocabulary | Eight words (same set as mock secrets) |
-| ES | N=16, σ=0.02, α=0.12; rank fitness; normalized gradient step |
-| Warm-start | 400 steps, Adam lr 3e-4 |
-| Eval | Every 10 iterations; greedy success for logging when `EVAL_DETERMINISTIC=True` |
+| Setting | `TRAIN_BUDGET="long"` | `TRAIN_BUDGET="fast"` |
+| ------- | --------------------- | --------------------- |
+| `MAX_VOCAB` | 8 (= `len(MOCK_WORDLE_TARGETS)`) | same when mock |
+| ES population / iters | `N_POP=16`, `N_ITERATIONS=10` | `N_POP=8`, `N_ITERATIONS=40` |
+| `SIGMA` / `ALPHA` | 0.02 / 0.12 | same |
+| Fitness | `FITNESS_OBJECTIVE="win_plus_return"`, `WIN_FITNESS_SCALE=8.0` | same |
+| `RANK_FITNESS` / `NORMALIZE_GRADIENT` | both `True` | same |
+| Rollouts per ES member | `n_eval_episodes=2` | `1` |
+| Logging eval | `EVAL_EVERY=10`, `EVAL_N_EPISODES=24`, `EVAL_DETERMINISTIC=True` | `EVAL_N_EPISODES=16` |
+| Warm-start | `WARM_START_STEPS=400`, `WARM_START_LR=3e-4` | 200 steps |
 
-`N_ITERATIONS` is chosen to fit available compute; switching `TRAIN_BUDGET` to `"fast"` reduces population size, warm-start length, and eval episodes.
+Other toggles in the same cell include `MODEL_NAME` (default **distilgpt2**), `USE_LORA=False`, `RICHER_PROMPT=True`, and `USE_PRIME_TARGETS=False` for the common-word vocabulary builder. Setting `MOCK_ENV=False` switches to Prime loading in the wrapper and uses `MAX_VOCAB` 64 (long) or 256 (fast) unless you change the cell—you then need secrets and actions aligned, as in the problem statement above.
 
 Code and artifacts:
 
@@ -55,7 +58,7 @@ On the **eight-word mock** with warm-start enabled, **greedy** evaluation at the
 **Immediate improvements.**
 
 1. **Prime data with a narrow policy.** If we keep a small `MAX_VOCAB`, we should only reset episodes whose target lies in `policy.words`, or build the word list from the verifier train and eval targets so every sampled game is solvable.
-2. **Curriculum.** Increase vocabulary size in stages while preserving the invariant that every secret is an allowed action.
+2. **Curriculum Learning.** Increase vocabulary size in stages while preserving the invariant that every secret is an allowed action.
 3. **Fair comparison to Week 6.** Match total environment steps and seeds where possible, and report mean and spread across seeds rather than a single long run.
 4. **Larger models and longer budgets.** Move off CPU to **GPU** for DistilGPT-2 (or swap `MODEL_NAME` to full **GPT-2** or another HF causal LM), increase `N_ITERATIONS` and `N_POP`, and rerun with the same logging so we can see whether ES continues to improve once the easy eight-word mock is saturated.
 

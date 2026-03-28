@@ -17,9 +17,11 @@ from wordle_env import (
     WordleEnvironmentWrapper,
     WordleState,
     WordVocabulary,
-    load_wordle_environment
+    load_wordle_environment,
+    MOCK_WORDLE_TARGETS,
 )
 from wordle_networks import WordleDiscretePolicy, WordleValueNetwork
+from wordle_gpt2_policy import WordleGPT2Policy, TRANSFORMERS_AVAILABLE
 
 
 class TestWordVocabulary:
@@ -210,6 +212,44 @@ class TestWordleValue:
         batch_states = torch.randn(10, 64)
         batch_values = value_net(batch_states)
         assert batch_values.shape == (10,)
+
+
+@pytest.mark.skipif(not TRANSFORMERS_AVAILABLE, reason="transformers not installed")
+class TestWordleGPT2Policy:
+    """Frozen LM + head policy (requires Hugging Face transformers + model download)."""
+
+    def test_gpt2_policy_forward_and_xml(self):
+        pytest.importorskip("transformers")
+        env = WordleEnvironmentWrapper(num_episodes=5, max_turns=6)
+        policy = WordleGPT2Policy(use_prime_targets=False, max_vocab_size=64)
+        state = env.reset()
+        logits = policy.forward_logits(state)
+        assert logits.shape == (len(policy.words),)
+        emb = env.get_state_embedding(state)
+        xml, _ = policy.format_action_xml(state, emb, deterministic=True)
+        assert "<guess>" in xml and "</guess>" in xml
+
+    def test_es_only_optimizes_head(self):
+        pytest.importorskip("transformers")
+        from es_wordle import _trainable_params
+
+        policy = WordleGPT2Policy(use_prime_targets=False, max_vocab_size=32)
+        trainable = _trainable_params(policy)
+        assert len(trainable) >= 1
+        assert all(p.requires_grad for p in trainable)
+        frozen = [p for p in policy.lm.parameters() if p.requires_grad]
+        assert len(frozen) == 0
+
+    def test_truncated_vocab_includes_mock_targets(self):
+        """Alphabet-only first-256 words omitted SLATE/LIGHT etc.; priority list fixes that."""
+        pytest.importorskip("transformers")
+        policy = WordleGPT2Policy(
+            use_prime_targets=False,
+            max_vocab_size=256,
+            include_mock_targets_in_vocab=True,
+        )
+        for w in MOCK_WORDLE_TARGETS:
+            assert w in policy.words
 
 
 class TestIntegration:

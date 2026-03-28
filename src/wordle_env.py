@@ -18,6 +18,12 @@ except ImportError:
     TORCH_AVAILABLE = False
     print("WARNING: torch/numpy not available. Install requirements.txt")
 
+# Mock Wordle targets (keep in sync with WordleEnvironmentWrapper.reset fallback).
+# Policies with truncated vocabularies should still include these so episodes are solvable.
+MOCK_WORDLE_TARGETS = [
+    "CRANE", "SLATE", "TRACE", "AUDIO", "PLANT", "HEART", "LIGHT", "DREAM",
+]
+
 
 @dataclass
 class WordleState:
@@ -139,12 +145,11 @@ class WordleEnvironmentWrapper:
         else:
             # Mock environment for testing
             import random
-            mock_targets = ["CRANE", "SLATE", "TRACE", "AUDIO", "PLANT", "HEART", "LIGHT", "DREAM"]
             self.current_state = WordleState(
                 conversation_history="Guess a 5-letter word. You have 6 attempts.",
                 turn_number=0,
                 game_complete=False,
-                target_word=random.choice(mock_targets)
+                target_word=random.choice(MOCK_WORDLE_TARGETS)
             )
         
         return self.current_state

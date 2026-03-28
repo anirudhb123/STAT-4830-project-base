@@ -9,10 +9,15 @@ import numpy as np
 from typing import Tuple, List, Dict
 
 
+def _trainable_params(policy):
+    """Parameters ES should optimize (excludes frozen backbone weights)."""
+    return [p for p in policy.parameters() if p.requires_grad]
+
+
 def _set_flat_params(policy, flat_params: torch.Tensor):
-    """Set policy parameters from a flattened parameter vector."""
+    """Set trainable policy parameters from a flattened parameter vector."""
     offset = 0
-    for param in policy.parameters():
+    for param in _trainable_params(policy):
         param_length = param.numel()
         param_slice = flat_params[offset:offset + param_length]
         param.data = param_slice.to(device=param.device, dtype=param.dtype).view_as(param).clone()
@@ -64,7 +69,8 @@ def es_gradient_estimate_wordle(
     N: int = 20,
     sigma: float = 0.05,
     n_eval_episodes: int = 3,
-    max_turns: int = 6
+    max_turns: int = 6,
+    rank_fitness: bool = False,
 ) -> Tuple[torch.Tensor, float, List[float]]:
     """
     Estimate gradient using Evolution Strategies for Wordle.
@@ -81,15 +87,16 @@ def es_gradient_estimate_wordle(
         sigma: Noise scale
         n_eval_episodes: Episodes per perturbation evaluation
         max_turns: Max turns per episode (6 for Wordle)
+        rank_fitness: If True, use centered ranks instead of z-scoring (often better for small N)
     
     Returns:
         gradient: Estimated gradient (flattened parameter vector)
         avg_fitness: Average fitness across population
         fitness_values: List of fitness values for all perturbations
     """
-    # Get flattened parameters
-    params = torch.cat([p.flatten() for p in policy.parameters()])
-    policy_device = next(policy.parameters()).device
+    # Get flattened trainable parameters (frozen layers excluded)
+    params = torch.cat([p.flatten() for p in _trainable_params(policy)])
+    policy_device = params.device
     n_params = params.shape[0]
     
     # Storage
@@ -113,12 +120,22 @@ def es_gradient_estimate_wordle(
     fitness_tensor = torch.tensor(fitness_values, dtype=torch.float32, device=policy_device)
     perturbations_tensor = torch.stack(perturbations)
     
-    # Standardize fitness (improves stability)
-    fitness_std = fitness_tensor.std()
-    if fitness_std > 1e-8:
-        fitness_normalized = (fitness_tensor - fitness_tensor.mean()) / fitness_std
+    # Standardize fitness (z-score) or rank-transform (robust for small N)
+    if rank_fitness:
+        order = torch.argsort(fitness_tensor, descending=True)
+        ranks = torch.zeros(N, device=policy_device, dtype=torch.float32)
+        for rank, idx in enumerate(order):
+            ranks[idx] = float(N - 1 - rank)
+        fitness_normalized = ranks - ranks.mean()
+        rs = fitness_normalized.std()
+        if rs > 1e-8:
+            fitness_normalized = fitness_normalized / rs
     else:
-        fitness_normalized = fitness_tensor - fitness_tensor.mean()
+        fitness_std = fitness_tensor.std()
+        if fitness_std > 1e-8:
+            fitness_normalized = (fitness_tensor - fitness_tensor.mean()) / fitness_std
+        else:
+            fitness_normalized = fitness_tensor - fitness_tensor.mean()
     
     # Gradient estimate: (1/Nσ) Σ F_i · ε_i
     gradient = (perturbations_tensor.T @ fitness_normalized) / (N * sigma)
@@ -136,7 +153,11 @@ def train_es_wordle(
     n_eval_episodes: int = 3,
     max_turns: int = 6,
     eval_every: int = 10,
-    verbose: bool = True
+    verbose: bool = True,
+    normalize_gradient: bool = False,
+    eval_n_episodes: int = 20,
+    rank_fitness: bool = False,
+    eval_deterministic: bool = True,
 ) -> Dict[str, List]:
     """
     Train policy using Evolution Strategies on Wordle.
@@ -152,12 +173,17 @@ def train_es_wordle(
         max_turns: Max turns per episode (6 for Wordle)
         eval_every: Evaluate policy every N iterations
         verbose: Print progress
+        normalize_gradient: If True, apply θ ← θ + α·ĝ/‖ĝ‖ (stable for high-dim heads); else θ ← θ + α·ĝ
+        eval_n_episodes: Number of episodes for periodic eval rollouts (logging only)
+        rank_fitness: If True, ES uses rank-normalized fitness (recommended when N is small)
+        eval_deterministic: If False, periodic eval matches ES rollouts (stochastic actions).
+            Argmax eval can show 0% success while fitness uses sampling from the same logits.
     
     Returns:
         history: Dictionary with training history
     """
-    # Get flattened parameters
-    params = torch.cat([p.flatten() for p in policy.parameters()])
+    # Flattened trainable parameters
+    params = torch.cat([p.flatten() for p in _trainable_params(policy)])
     
     # Training history
     history = {
@@ -176,15 +202,18 @@ def train_es_wordle(
             N=N,
             sigma=sigma,
             n_eval_episodes=n_eval_episodes,
-            max_turns=max_turns
+            max_turns=max_turns,
+            rank_fitness=rank_fitness,
         )
         
-        # Update parameters
-        params = params + alpha * gradient
-        _set_flat_params(policy, params)
-        
-        # Logging
+        # Update parameters (optional unit-norm step: avoids huge ‖ĝ‖ when dim(θ) is large)
+        update = alpha * gradient
         grad_norm = gradient.norm().item()
+        if normalize_gradient and grad_norm > 1e-8:
+            update = alpha * gradient / gradient.norm()
+        params = params + update
+        _set_flat_params(policy, params)
+        step_norm = update.norm().item()
         
         # Periodic evaluation
         if iteration % eval_every == 0 or iteration == n_iterations - 1:
@@ -195,7 +224,7 @@ def train_es_wordle(
             
             policy.eval()
             with torch.no_grad():
-                for _ in range(20):  # Eval on 20 episodes
+                for _ in range(eval_n_episodes):
                     state = env.reset()
                     episode_reward = 0
                     done = False
@@ -206,10 +235,12 @@ def train_es_wordle(
                         
                         if hasattr(policy, 'format_action_xml'):
                             action_xml, _ = policy.format_action_xml(
-                                state, state_embedding, deterministic=True
+                                state, state_embedding, deterministic=eval_deterministic
                             )
                         else:
-                            action_idx, _ = policy.get_action(state_embedding, deterministic=True)
+                            action_idx, _ = policy.get_action(
+                                state_embedding, deterministic=eval_deterministic
+                            )
                             word = policy.vocab.action_to_word(action_idx)
                             action_xml = f"<guess>{word}</guess>"
                         
@@ -233,11 +264,15 @@ def train_es_wordle(
             history['gradient_norm'].append(grad_norm)
             
             if verbose:
-                print(f"Iter {iteration:4d} | "
-                      f"Fitness: {avg_fitness:6.3f} | "
-                      f"Eval Reward: {eval_reward:6.3f} | "
-                      f"Success: {eval_success:5.1%} | "
-                      f"Turns: {eval_turns:4.1f} | "
-                      f"Grad Norm: {grad_norm:.4f}")
+                _ev = "greedy" if eval_deterministic else "stoch"
+                print(
+                    f"Iter {iteration:4d} | "
+                    f"Fitness: {avg_fitness:6.3f} | "
+                    f"Eval Reward: {eval_reward:6.3f} | "
+                    f"Success: {eval_success:5.1%} ({_ev}) | "
+                    f"Turns: {eval_turns:4.1f} | "
+                    f"Grad‖: {grad_norm:.2f} | "
+                    f"Step‖: {step_norm:.4f}"
+                )
     
     return history

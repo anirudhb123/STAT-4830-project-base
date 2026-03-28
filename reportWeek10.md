@@ -1,0 +1,72 @@
+# Wordle with DistilGPT-2, Warm-Start, and Evolution Strategies
+
+## Problem Statement
+
+**What are we optimizing?** We are training a policy to play Wordle by attaching a **linear head** to a frozen **DistilGPT-2** model (Hugging Face `transformers`). Each action is still a five-letter word from a fixed list; the head produces logits over that list. We update the head with **Evolution Strategies**, and the notebook supports optional **LoRA** on the transformer via `peft` if we want to train more than the head. Unlike the Week 6 setup, the policy does not read only a 64-dimensional embedding: it sees a **text prompt** built from the turn number, previous guesses, Wordle feedback, and (optionally) a short structured constraint summary from `wordle_hints.py`.
+
+**Why does this problem matter?** In Week 6, an MLP on the fixed embedding with a large vocabulary reached only modest success. A small pretrained language model gives a much stronger starting representation for “what kind of word fits this feedback.” ES remains useful here because we still optimize from **rollout fitness** rather than differentiating through the environment. One practical issue we hit is that **the hidden answer must appear in the policy’s vocabulary**: if the environment draws secrets from a big dataset while the policy only allows a handful of words, many games are unwinnable and both supervised warm-start and ES look like they fail.
+
+**How will we measure success?** We follow the metrics printed by `train_es_wordle` in `notebooks/week10_implementation.ipynb`: periodic evaluation gives **success rate** (fraction of eval episodes solved within six turns), **average reward**, and **average turns**. The logger also reports **ES_win**, the average win rate across the **perturbed** policies evaluated in each ES iteration, plus training diagnostics such as mean fitness, gradient norm, and parameter drift. The notebook plots eval curves on the iterations where evaluation runs and overlays per-iteration training statistics on the full ES horizon.
+
+**Constraints and risks.** Forward passes through DistilGPT-2 dominate runtime; **CPU** training is workable but slow when `N_POP` and the number of ES iterations are large. The default configuration in the notebook uses a **mock** Wordle wrapper and restricts both **secrets** and **legal guesses** to the same **eight** words (`MOCK_WORDLE_TARGETS`), which makes the task easier than Week 6 but gives a clean signal that the pipeline is behaving. Moving back to the full Prime-style environment while keeping a small action set would require either enlarging the vocabulary to cover dataset targets or restricting which episodes are sampled.
+
+## Technical Approach
+
+**Environment and reward.** We still use `src/wordle_env.py`. Actions are XML strings containing `<guess>WORD</guess>`; feedback and rewards follow the same rubric as in Week 6 (`WordleEnvironmentWrapper._simulate_prime_step` / mock path). For mock training, `load_wordle_environment(use_prime_intellect=False)` ensures resets draw targets from `MOCK_WORDLE_TARGETS` instead of pulling a random row from the verifier dataset when `verifiers` happens to be installed locally.
+
+**Policy.** `src/wordle_gpt2_policy.py` tokenizes the prompt, runs DistilGPT-2 with the backbone frozen unless LoRA is enabled, takes the hidden state at the last non-padding position, and applies a linear map to logits over `policy.words`. Guesses already played are masked out before sampling or taking an argmax. The policy formats guesses as XML for the environment.
+
+**Supervised warm-start.** Before ES, `src/wordle_gpt2_warmstart.py` can run several hundred steps of supervised learning: we roll out a few random legal guesses, then minimize cross-entropy from the model logits to the **index** of the true word. The answer is never pasted into the prompt; it is only the label. Steps are skipped when there is no usable prefix or when the target is missing from `policy.word_to_idx`, and the notebook prints how many steps were skipped.
+
+**Evolution Strategies.** We reuse the Wordle ES loop in `src/es_wordle.py`, estimating a gradient over flattened trainable parameters with Gaussian perturbations:
+
+```
+grad_theta J(theta) ≈ (1/(N*sigma)) * sum_i R(theta + sigma*epsilon_i) * epsilon_i
+where epsilon_i ~ Normal(0, I)
+```
+
+Here `R` denotes fitness for the perturbed weights (episode return, win rate, or a win-plus-return mix). We can **rank-transform** fitness across the population and apply a **normalized** gradient step when the head dimension is large.
+
+**Experimental configuration (from `notebooks/week10_implementation.ipynb`).**
+
+
+| Setting | Mock “long” budget (illustrative) |
+| ------- | ---------------------------------- |
+| Model | distilgpt2; head trained with ES; LoRA off by default |
+| Vocabulary | Eight words (same set as mock secrets) |
+| ES | N=16, σ=0.02, α=0.12; rank fitness; normalized gradient step |
+| Warm-start | 400 steps, Adam lr 3e-4 |
+| Eval | Every 10 iterations; greedy success for logging when `EVAL_DETERMINISTIC=True` |
+
+`N_ITERATIONS` is chosen to fit available compute; switching `TRAIN_BUDGET` to `"fast"` reduces population size, warm-start length, and eval episodes.
+
+Code and artifacts:
+
+- `notebooks/week10_implementation.ipynb` (training, plots, optional checkpoint save)
+- `src/wordle_gpt2_policy.py`, `src/wordle_gpt2_warmstart.py`, `src/es_wordle.py`, `src/wordle_env.py`, `src/wordle_hints.py`
+- `models/wordle_gpt2_es_head.ipynb_run.pt` (head weights, word list, and `history` dict)
+
+## Initial Results
+
+On the **eight-word mock** with warm-start enabled, **greedy** evaluation at the start of ES is already strong. The supervised phase learns to map typical feedback patterns to the correct word among eight options, so the first logged eval in a full run can show high success and fewer than six turns on average. During ES, **ES_win** varies from iteration to iteration because each population member uses perturbed weights, so some perturbations help and others hurt even when the center policy is good. When **normalize_gradient** is turned on, the printed **Step‖** stays nearly constant because each update uses a fixed learning rate times a unit-norm direction.
+
+## Next Steps
+
+**Immediate improvements.**
+
+1. **Prime data with a narrow policy.** If we keep a small `MAX_VOCAB`, we should only reset episodes whose target lies in `policy.words`, or build the word list from the verifier train and eval targets so every sampled game is solvable.
+2. **Curriculum.** Increase vocabulary size in stages while preserving the invariant that every secret is an allowed action.
+3. **Fair comparison to Week 6.** Match total environment steps and seeds where possible, and report mean and spread across seeds rather than a single long run.
+4. **Larger models and longer budgets.** Move off CPU to **GPU** for DistilGPT-2 (or swap `MODEL_NAME` to full **GPT-2** or another HF causal LM), increase `N_ITERATIONS` and `N_POP`, and rerun with the same logging so we can see whether ES continues to improve once the easy eight-word mock is saturated.
+
+**Technical improvements.**
+
+- Turn on **LoRA** on GPU and compare sample cost and final success to head-only ES, building on the Week 8 theme of low-rank adaptation.
+- Add **mirrored sampling** or a schedule on σ to reduce variance in the ES gradient estimate.
+
+
+## References
+
+1. Salimans, T., Ho, J., Chen, X., Sidor, S., & Sutskever, I. (2017). Evolution Strategies as a Scalable Alternative to Reinforcement Learning. *arXiv:1703.03864*.
+2. Sanh, V., Debut, L., Chaumond, J., & Wolf, T. (2019). DistilBERT, a distilled version of BERT: smaller, faster, cheaper and lighter. *NeurIPS EMC² Workshop*.
+3. Hu, E. J., et al. (2021). LoRA: Low-Rank Adaptation of Large Language Models. *arXiv:2106.09685*.

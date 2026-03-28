@@ -51,7 +51,8 @@ class WordleEnvironmentWrapper:
         self,
         num_episodes: int = 100,
         max_turns: int = 6,
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
+        use_prime_intellect: bool = True,
     ):
         """
         Initialize Wordle environment.
@@ -60,14 +61,21 @@ class WordleEnvironmentWrapper:
             num_episodes: Number of episodes to generate
             max_turns: Maximum turns per episode (standard Wordle is 6)
             seed: Random seed for reproducibility
+            use_prime_intellect: If False, never load verifiers; ``reset()`` uses
+                ``MOCK_WORDLE_TARGETS`` only (matches small policy vocabs).
         """
         self.num_episodes = num_episodes
         self.max_turns = max_turns
         self.seed = seed
         
-        # Try to load Prime Intellect environment
         self.prime_env = None
-        self._load_prime_environment()
+        if use_prime_intellect:
+            self._load_prime_environment()
+        else:
+            print(
+                "[OK] Mock Wordle environment (Prime Intellect disabled; "
+                "targets from MOCK_WORDLE_TARGETS)."
+            )
         
         # State tracking
         self.current_episode = 0
@@ -404,15 +412,26 @@ class WordVocabulary:
             
             env = load_environment('wordle')
             
-            # Extract all target words
-            targets = set()
-            for episode in env.dataset:
+            def _episode_target(episode: Any) -> Optional[str]:
                 target = episode.get('target', episode.get('answer', ''))
                 if isinstance(target, list):
                     target = target[0] if len(target) > 0 else ''
                 if target and len(str(target)) == 5:
-                    targets.add(str(target).upper())
-            
+                    return str(target).upper()
+                return None
+
+            targets = set()
+            for episode in env.dataset:
+                t = _episode_target(episode)
+                if t:
+                    targets.add(t)
+            eval_ds = getattr(env, 'eval_dataset', None)
+            if eval_ds is not None:
+                for episode in eval_ds:
+                    t = _episode_target(episode)
+                    if t:
+                        targets.add(t)
+
             words = sorted(list(targets))
             print(f"[OK] Loaded {len(words)} words from Prime Intellect dataset")
             return words
@@ -579,20 +598,8 @@ def load_wordle_environment(
     Returns:
         Wrapped Wordle environment
     """
-    if use_prime_intellect:
-        try:
-            # This will be the actual Prime Intellect integration
-            env = WordleEnvironmentWrapper(
-                num_episodes=num_train_examples,
-                max_turns=6
-            )
-            return env
-        except Exception as e:
-            print(f"Failed to load Prime Intellect environment: {e}")
-            print("Falling back to mock environment")
-    
-    # Fallback to mock
     return WordleEnvironmentWrapper(
         num_episodes=num_train_examples,
-        max_turns=6
+        max_turns=6,
+        use_prime_intellect=use_prime_intellect,
     )

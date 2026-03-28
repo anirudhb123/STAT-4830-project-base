@@ -25,26 +25,30 @@ def _set_flat_params(policy, flat_params: torch.Tensor):
 
 
 def _evaluate_perturbation(policy, env, perturbed_params, n_eval_episodes, max_turns):
-    """Evaluate fitness of a perturbed policy."""
-    # Set perturbed parameters
+    """
+    Evaluate fitness of a perturbed policy.
+
+    Returns (mean_episode_return, win_rate) where win_rate is the fraction of
+    eval episodes that ended with a correct guess. Wordle rewards mix partial
+    credit into the return, so mean_return can stay ~flat even when win_rate is 0%.
+    """
     _set_flat_params(policy, perturbed_params)
-    
-    # Evaluate fitness (average reward over episodes)
+
     fitness = 0.0
+    wins = 0
     for _ in range(n_eval_episodes):
         state = env.reset()
         episode_reward = 0
         done = False
         turns = 0
-        
+        info: dict = {}
+
         policy.eval()
         with torch.no_grad():
             while not done and turns < max_turns:
-                # Get state embedding
                 state_embedding = env.get_state_embedding(state)
-                
-                # Get action from policy
-                if hasattr(policy, 'format_action_xml'):
+
+                if hasattr(policy, "format_action_xml"):
                     action_xml, _ = policy.format_action_xml(
                         state, state_embedding, deterministic=False
                     )
@@ -52,15 +56,18 @@ def _evaluate_perturbation(policy, env, perturbed_params, n_eval_episodes, max_t
                     action_idx, _ = policy.get_action(state_embedding, deterministic=False)
                     word = policy.vocab.action_to_word(action_idx)
                     action_xml = f"<guess>{word}</guess>"
-                
-                # Take step
+
                 state, reward, done, info = env.step(action_xml)
                 episode_reward += reward
                 turns += 1
-        
+
         fitness += episode_reward
-    
-    return fitness / n_eval_episodes
+        if float(info.get("correct_answer", 0.0)) >= 0.5:
+            wins += 1
+
+    mean_ret = fitness / n_eval_episodes
+    win_rate = wins / max(1, n_eval_episodes)
+    return mean_ret, win_rate
 
 
 def es_gradient_estimate_wordle(
@@ -71,7 +78,9 @@ def es_gradient_estimate_wordle(
     n_eval_episodes: int = 3,
     max_turns: int = 6,
     rank_fitness: bool = False,
-) -> Tuple[torch.Tensor, float, List[float]]:
+    fitness_objective: str = "return",
+    win_fitness_scale: float = 5.0,
+) -> Tuple[torch.Tensor, float, List[float], float, float]:
     """
     Estimate gradient using Evolution Strategies for Wordle.
     
@@ -88,30 +97,48 @@ def es_gradient_estimate_wordle(
         n_eval_episodes: Episodes per perturbation evaluation
         max_turns: Max turns per episode (6 for Wordle)
         rank_fitness: If True, use centered ranks instead of z-scoring (often better for small N)
+        fitness_objective: What ES maximizes per perturbation:
+            ``"return"`` — mean episode return (default; partial credit inflates Fitness).
+            ``"win"`` — mean win rate only (sparse; often needs rank_fitness and larger N).
+            ``"win_plus_return"`` — ``win_fitness_scale * win_rate + mean_return`` so wins
+            dominate but return still differentiates when everyone loses.
+        win_fitness_scale: Multiplier on win rate for ``win_plus_return`` (default 5.0).
     
     Returns:
         gradient: Estimated gradient (flattened parameter vector)
-        avg_fitness: Average fitness across population
-        fitness_values: List of fitness values for all perturbations
+        avg_fitness: Average **optimization** fitness across population (same scale as objective)
+        fitness_values: List of fitness values used for ES
+        avg_es_win: Mean win rate (0–1) across the N perturbation rollouts
+        pop_fitness_std: Std dev of per-member fitness (shows ES population spread)
     """
     # Get flattened trainable parameters (frozen layers excluded)
     params = torch.cat([p.flatten() for p in _trainable_params(policy)])
     policy_device = params.device
     n_params = params.shape[0]
     
-    # Storage
+    if fitness_objective not in ("return", "win", "win_plus_return"):
+        raise ValueError(
+            f"fitness_objective must be 'return', 'win', or 'win_plus_return', got {fitness_objective!r}"
+        )
+
     perturbations = []
-    fitness_values = []
-    
-    # Sample and evaluate perturbations
-    for i in range(N):
-        # Sample perturbation
+    fitness_values: List[float] = []
+    es_win_rates: List[float] = []
+
+    for _ in range(N):
         epsilon = torch.randn(n_params, device=policy_device)
         perturbations.append(epsilon)
-        
-        # Evaluate perturbation
-        fitness = _evaluate_perturbation(policy, env, params + sigma * epsilon, n_eval_episodes, max_turns)
-        fitness_values.append(fitness)
+
+        mean_ret, wr = _evaluate_perturbation(
+            policy, env, params + sigma * epsilon, n_eval_episodes, max_turns
+        )
+        es_win_rates.append(wr)
+        if fitness_objective == "return":
+            fitness_values.append(mean_ret)
+        elif fitness_objective == "win":
+            fitness_values.append(float(wr))
+        else:
+            fitness_values.append(win_fitness_scale * float(wr) + mean_ret)
     
     # Restore original parameters
     _set_flat_params(policy, params)
@@ -140,7 +167,9 @@ def es_gradient_estimate_wordle(
     # Gradient estimate: (1/Nσ) Σ F_i · ε_i
     gradient = (perturbations_tensor.T @ fitness_normalized) / (N * sigma)
     
-    return gradient, fitness_tensor.mean().item(), fitness_values
+    avg_es_win = float(np.mean(es_win_rates))
+    pop_fitness_std = float(np.std(fitness_values)) if len(fitness_values) > 1 else 0.0
+    return gradient, fitness_tensor.mean().item(), fitness_values, avg_es_win, pop_fitness_std
 
 
 def train_es_wordle(
@@ -158,6 +187,8 @@ def train_es_wordle(
     eval_n_episodes: int = 20,
     rank_fitness: bool = False,
     eval_deterministic: bool = True,
+    fitness_objective: str = "win_plus_return",
+    win_fitness_scale: float = 5.0,
 ) -> Dict[str, List]:
     """
     Train policy using Evolution Strategies on Wordle.
@@ -178,32 +209,45 @@ def train_es_wordle(
         rank_fitness: If True, ES uses rank-normalized fitness (recommended when N is small)
         eval_deterministic: If False, periodic eval matches ES rollouts (stochastic actions).
             Argmax eval can show 0% success while fitness uses sampling from the same logits.
+        fitness_objective: Passed to ``es_gradient_estimate_wordle`` (default ``win_plus_return``).
+        win_fitness_scale: Weight on win rate in ``win_plus_return`` mode.
     
     Returns:
         history: Dictionary with training history
     """
     # Flattened trainable parameters
     params = torch.cat([p.flatten() for p in _trainable_params(policy)])
-    
-    # Training history
+    params_init = params.clone()
+
+    # Eval checkpoints (every eval_every) — kept for backward compatibility
     history = {
-        'iteration': [],
-        'avg_fitness': [],
-        'eval_reward': [],
-        'eval_success': [],
-        'eval_turns': [],
-        'gradient_norm': []
+        "iteration": [],
+        "avg_fitness": [],
+        "eval_reward": [],
+        "eval_success": [],
+        "eval_turns": [],
+        "gradient_norm": [],
     }
-    
+    # Every ES step — use this to *see* optimization (param drift, fitness noise, etc.)
+    history["train_iter"] = []
+    history["train_fitness"] = []
+    history["train_es_win"] = []
+    history["train_grad_norm"] = []
+    history["param_drift"] = []
+    history["pop_fitness_std"] = []
+
     for iteration in range(n_iterations):
         # ES gradient step
-        gradient, avg_fitness, fitness_values = es_gradient_estimate_wordle(
-            policy, env,
+        gradient, avg_fitness, fitness_values, avg_es_win, pop_fitness_std = es_gradient_estimate_wordle(
+            policy,
+            env,
             N=N,
             sigma=sigma,
             n_eval_episodes=n_eval_episodes,
             max_turns=max_turns,
             rank_fitness=rank_fitness,
+            fitness_objective=fitness_objective,
+            win_fitness_scale=win_fitness_scale,
         )
         
         # Update parameters (optional unit-norm step: avoids huge ‖ĝ‖ when dim(θ) is large)
@@ -214,7 +258,15 @@ def train_es_wordle(
         params = params + update
         _set_flat_params(policy, params)
         step_norm = update.norm().item()
-        
+        param_drift = (params - params_init).norm().item()
+
+        history["train_iter"].append(iteration)
+        history["train_fitness"].append(avg_fitness)
+        history["train_es_win"].append(avg_es_win)
+        history["train_grad_norm"].append(grad_norm)
+        history["param_drift"].append(param_drift)
+        history["pop_fitness_std"].append(pop_fitness_std)
+
         # Periodic evaluation (full rollout stats; slow when eval_n_episodes is large)
         if iteration % eval_every == 0 or iteration == n_iterations - 1:
             # Evaluate on environment
@@ -265,20 +317,31 @@ def train_es_wordle(
             
             if verbose:
                 _ev = "greedy" if eval_deterministic else "stoch"
+                _fl = {"return": "ret", "win": "win", "win_plus_return": "win+ret"}.get(
+                    fitness_objective, fitness_objective
+                )
                 print(
                     f"Iter {iteration:4d} | "
-                    f"Fitness: {avg_fitness:6.3f} | "
+                    f"Fit({_fl}): {avg_fitness:6.3f} | "
+                    f"ES_win: {avg_es_win:5.1%} | "
+                    f"popσ: {pop_fitness_std:.4f} | "
                     f"Eval Reward: {eval_reward:6.3f} | "
                     f"Success: {eval_success:5.1%} ({_ev}) | "
                     f"Turns: {eval_turns:4.1f} | "
                     f"Grad‖: {grad_norm:.2f} | "
-                    f"Step‖: {step_norm:.4f}"
+                    f"Step‖: {step_norm:.4f} | "
+                    f"‖θ-θ₀‖: {param_drift:.2f}"
                 )
         elif verbose:
-            # ES-only iterations used to print nothing until the next eval_every — confusing on slow CPU
+            _fl = {"return": "ret", "win": "win", "win_plus_return": "win+ret"}.get(
+                fitness_objective, fitness_objective
+            )
             print(
-                f"Iter {iteration:4d} | Fitness: {avg_fitness:6.3f} | "
-                f"Grad‖: {grad_norm:.2f} | Step‖: {step_norm:.4f} | (no eval)"
+                f"Iter {iteration:4d} | Fit({_fl}): {avg_fitness:6.3f} | "
+                f"ES_win: {avg_es_win:5.1%} | "
+                f"popσ: {pop_fitness_std:.4f} | "
+                f"Grad‖: {grad_norm:.2f} | Step‖: {step_norm:.4f} | "
+                f"‖θ-θ₀‖: {param_drift:.2f} | (no eval)"
             )
     
     return history

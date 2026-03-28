@@ -61,13 +61,12 @@ On the **eight-word mock** with warm-start enabled, **greedy** evaluation at the
 
 1. **Prime data with a narrow policy.** If we keep a small `MAX_VOCAB`, we should only reset episodes whose target lies in `policy.words`, or build the word list from the verifier train and eval targets so every sampled game is solvable.
 2. **Curriculum Learning.** Increase vocabulary size in stages while preserving the invariant that every secret is an allowed action.
-3. **Fair comparison to Week 6.** Match total environment steps and seeds where possible, and report mean and spread across seeds rather than a single long run.
-4. **Larger models and longer budgets.** Move off CPU to **GPU** for DistilGPT-2 (or swap `MODEL_NAME` to full **GPT-2** or another HF causal LM), increase `N_ITERATIONS` and `N_POP`, and rerun with the same logging so we can see whether ES continues to improve once the easy eight-word mock is saturated.
+3. **Larger models and longer budgets.** Move off CPU to **GPU** for DistilGPT-2 (or swap `MODEL_NAME` to full **GPT-2** or another HF causal LM), increase `N_ITERATIONS` and `N_POP`, and rerun with the same logging so we can see whether ES continues to improve once the easy eight-word mock is saturated.
 
 **Technical improvements.**
 
-- Turn on **LoRA** on GPU and compare sample cost and final success to head-only ES, building on the Week 8 theme of low-rank adaptation.
-- Add **mirrored sampling** or a schedule on σ to reduce variance in the ES gradient estimate.
+- Turn on **LoRA** on GPU and compare sample cost and final success to head-only ES
+- Add a schedule on σ to reduce variance in the ES gradient estimate.
 
 
 ## References

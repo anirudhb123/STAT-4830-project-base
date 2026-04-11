@@ -1,5 +1,7 @@
 # Wordle with Profiles (Smoke / Gemma), Device-Aware Loading, and ES
 
+**Status (this submission).** Week 12 work here is **implementation**: the notebook and policy wiring support **`RUN_PROFILE="gemma_full"`** with **`google/gemma-3-1b-it`**, chat templates, and device-aware loading. **We do not yet report numerical results for Gemma**—full-scale training jobs are **still running**; we will add curves and checkpoints once those complete. What we have validated end-to-end so far is the **smoke** profile (DistilGPT-2, tiny budget) as a pipeline check.
+
 ## Problem Statement
 
 **What are we optimizing?** Same core objective as Week 10: a policy that plays Wordle by attaching a **linear head** to a **frozen** Hugging Face causal LM, with actions as five-letter words from a fixed list. Training still combines optional **supervised warm-start** (`wordle_gpt2_warmstart.py`) and **Evolution Strategies** (`train_es_wordle` in `src/es_wordle.py`). The policy consumes a **text prompt** (turn, guesses, feedback, optional structured constraints from `wordle_hints.py` when `RICHER_PROMPT=True`).
@@ -50,13 +52,15 @@ Global knobs in §2 still include `SIGMA=0.02`, `ALPHA=0.12`, `RICHER_PROMPT=Tru
 
 ## Initial Results
 
-The notebook’s **checked-in execution** uses **`RUN_PROFILE="smoke"`** on **CPU** (DistilGPT-2, tiny ES budget). That run is meant to **validate imports, env reset, warm-start, ES loop, and plotting**—not to report competitive Wordle performance. For **quantitative** claims comparable to Week 10’s ~10-iteration DistilGPT-2 mock curves, run **`gemma_full`** (or **`smoke=False`** with DistilGPT-2 by adding a profile) on **GPU**, fix seeds, and record `history` and plots in the notebook or appendix.
+**Gemma (`gemma_full`).** No results are reported here yet: **full-scale Gemma training is in progress** (same budget intent as the **`gemma_full`** row in the table above). When those jobs finish, we will record **`history`**, plots, and **`models/wordle_gpt2_es_head.gemma_full.pt`** and update this section.
 
-**Expectation from Week 10:** On the **eight-word mock** with substantial warm-start and ES budget, greedy eval can start strong after warm-start; ES may add a modest success-rate lift with noisy per-iteration fitness. The same qualitative behavior should transfer once Gemma runs complete, modulo compute and possible hyperparameter retuning for the larger model.
+**Smoke profile (implementation check only).** The notebook’s typical **checked-in** execution uses **`RUN_PROFILE="smoke"`** (DistilGPT-2, tiny ES budget), often on **CPU**, to **validate imports, env reset, warm-start, ES loop, and plotting**. That is **not** a scientific baseline comparable to Week 10’s longer DistilGPT-2 runs.
+
+**Expectation once Gemma runs complete (preview).** From Week 10, on the **eight-word mock** with substantial warm-start and ES budget, greedy eval can start strong after warm-start and ES may add a modest success-rate lift; we will see whether the same holds for Gemma 3 1B IT after hyperparameter and compute tuning.
 
 ## Next Steps
 
-1. **Run `gemma_full` on GPU** with aligned dtype (`model_load_kwargs` on CUDA), log full `history`, and compare success / turns / wall-clock to Week 10 DistilGPT-2 at matched mock settings.  
+1. **Finish and document `gemma_full` runs** (in progress): when full-scale GPU jobs complete, log full `history`, plots, and wall-clock vs Week 10 DistilGPT-2 at matched mock settings, and update **Initial Results** above.  
 2. **Optional LoRA** (`USE_LORA=True`, `peft`) on GPU: compare trainable parameter count vs head-only ES.  
 3. **Scale vocabulary and align secrets** (Week 10 next steps): filter Prime targets to `policy.words` or grow `MAX_VOCAB` with curriculum.  
 4. **`wordle_hints.py`**: fix duplicate-letter constraint edge cases before relying on `RICHER_PROMPT` at scale.  

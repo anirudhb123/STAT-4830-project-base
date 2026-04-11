@@ -1,5 +1,7 @@
 # Week 12 Self-Critique
 
+**Scope of this critique.** Week 12 is **implementation-complete** (profiles, Gemma path, device/dtype loading, checkpoints). **Gemma full-scale ES + warm-start results are not available yet**—those training jobs are **still running**. Judgments below separate **what the code enables** from **what we have measured**; the main gap is **pending Gemma metrics**, not missing plumbing.
+
 ## ORIENT
 
 ### Strengths
@@ -22,7 +24,7 @@
 
 - **Smoke profile is too weak to validate ES behavior.** **`N_POP=4`**, **`N_ITERATIONS=2`**, **`n_eval_episodes=1`**, and **`WARM_START_STEPS=12`** produce almost no statistical signal. Smoke proves **plumbing**, not that **rank-normalized ES** is stable or improving the policy. Week 10’s critique about **noisy fitness** still applies; smoke amplifies variance.
 
-- **Committed results are still smoke-tier.** The notebook output checked into the repo reflects **`RUN_PROFILE="smoke"`** on CPU. There is still **no artifact-backed** **`gemma_full`** run in the template, so claims about Gemma + ES remain **hypothetical** until someone executes and logs a full profile.
+- **No Gemma results in the report yet—by design for now.** The repo still reflects **smoke-tier** notebook output for quick validation. **Full-scale `gemma_full` jobs are in flight**; until they finish, any claim about Gemma + ES performance is **speculative**. The critique in Week 10 about needing real curves applies to what we **will** paste in after those runs land.
 
 - **Core scientific gaps from Week 10 are mostly untouched.** Eight-word mock, **warm-start doing most of the work**, **duplicate-letter bugs in `wordle_hints.py`**, **Prime vocabulary vs secret misalignment**, and **no matched baseline vs Week 6 MLP** are still open. Week 12 is infrastructure, not a resolution of those issues.
 
@@ -42,7 +44,7 @@
 
 ### Concrete Next Actions
 
-1. **Execute `gemma_full` on GPU** with fixed seed; commit or appendix **one** full `history` + plot set, or explicitly state “not yet run” in the report if compute is pending.
+1. **Complete in-progress `gemma_full` GPU runs**; with fixed seed, commit or appendix **one** full `history` + plot set and refresh `reportWeek12.md` **Initial Results**. (The report already states results are pending while jobs run.)
 
 2. **Add a mid profile** (e.g. `distil_full`): Week 10 hyperparameters + **`EVAL_EVERY=2` or `5`** on DistilGPT-2 for **cheap** but meaningful ES curves—bridging smoke and Gemma.
 

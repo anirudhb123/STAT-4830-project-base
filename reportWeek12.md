@@ -1,4 +1,4 @@
-# Wordle with Profiles (Smoke / Gemma), Device-Aware Loading, and ES
+# Wordle with Gemma 3 1B IT, Device-Aware Loading, and Evolution Strategies
 
 **Status (this submission).** Week 12 work here is **implementation**: the notebook and policy wiring support **`RUN_PROFILE="gemma_full"`** with **`google/gemma-3-1b-it`**, chat templates, and device-aware loading. **We do not yet report numerical results for Gemma**—full-scale training jobs are **still running**; we will add curves and checkpoints once those complete. What we have validated end-to-end so far is the **smoke** profile (DistilGPT-2, tiny budget) as a pipeline check.
 

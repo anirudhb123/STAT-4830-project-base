@@ -10,23 +10,18 @@
 
 - **Denser eval logging in smoke mode.** With **`EVAL_EVERY=1`** and a short **`N_ITERATIONS`**, the eval curves actually have enough points to **see shape** during debugging. That partially fixes the Week 10 issue where **`EVAL_EVERY=10`** and **`N_ITERATIONS=10`** produced only **two** eval checkpoints—too sparse to interpret learning dynamics.
 
-- **Hardware-aware loading is a real upgrade.** `choose_device()` (CUDA / MPS / CPU) and **`default_model_load_kwargs`** for CUDA dtypes reduce foot-guns when moving off CPU. Week 10 assumed a single `DEVICE` string pattern; Week 12 is closer to how HF models are run in practice.
-
 - **Gemma IT path is structurally supported.** `USE_CHAT_TEMPLATE` and **`CHAT_GENERATION_PROMPT`** wired into `WordleGPT2Policy` match how instruction-tuned models expect prompts, which matters for **`google/gemma-3-1b-it`** in **`gemma_full`**. That is a meaningful extension beyond “always format like GPT-2.”
 
 - **Checkpoint isolation by profile.** Saving to **`models/wordle_gpt2_es_head.<RUN_PROFILE>.pt`** prevents a smoke run from clobbering a long Gemma checkpoint—a small change that avoids silent data loss.
 
-- **Operational robustness.** Default **`HF_HUB_DISABLE_XET=1`** documents and mitigates a class of hub download failures; the notebook explicitly requires **`transformers>=4.50.0`**, which is appropriate for newer Gemma stacks.
 
 ### Areas for Improvement
 
 - **Naming and mental model.** The policy class remains **`WordleGPT2Policy`** while **`gemma_full`** loads Gemma. That is confusing in code reviews and reports; a neutral name (e.g. `WordleHFCausalPolicy`) would scale better.
 
-- **Smoke profile is too weak to validate ES behavior.** **`N_POP=4`**, **`N_ITERATIONS=2`**, **`n_eval_episodes=1`**, and **`WARM_START_STEPS=12`** produce almost no statistical signal. Smoke proves **plumbing**, not that **rank-normalized ES** is stable or improving the policy. Week 10’s critique about **noisy fitness** still applies; smoke amplifies variance.
+- **Smoke profile may bee too weak to validate ES behavior.** **`N_POP=4`**, **`N_ITERATIONS=2`**, **`n_eval_episodes=1`**, and **`WARM_START_STEPS=12`** produce almost no statistical signal. Smoke proves **plumbing**, not that **rank-normalized ES** is stable or improving the policy. Week 10’s critique about **noisy fitness** still applies; smoke amplifies variance.
 
 - **No Gemma results in the report yet—by design for now.** The repo still reflects **smoke-tier** notebook output for quick validation. **Full-scale `gemma_full` jobs are in flight**; until they finish, any claim about Gemma + ES performance is **speculative**. The critique in Week 10 about needing real curves applies to what we **will** paste in after those runs land.
-
-- **Core scientific gaps from Week 10 are mostly untouched.** Eight-word mock, **warm-start doing most of the work**, **duplicate-letter bugs in `wordle_hints.py`**, **Prime vocabulary vs secret misalignment**, and **no matched baseline vs Week 6 MLP** are still open. Week 12 is infrastructure, not a resolution of those issues.
 
 - **`gemma_full` + `MOCK_ENV=True` still uses an 8-word task.** Scaling the **model** without scaling **task difficulty** risks expensive runs that only show “large LM on a tiny classification problem.” The critique from Week 10—that **79% on 8 words** is not comparable to **156-word Week 6**—still applies to any Gemma mock-only numbers.
 
@@ -49,10 +44,6 @@
 2. **Add a mid profile** (e.g. `distil_full`): Week 10 hyperparameters + **`EVAL_EVERY=2` or `5`** on DistilGPT-2 for **cheap** but meaningful ES curves—bridging smoke and Gemma.
 
 3. **Warm-start-only ablation** (carried from Week 10): after warm-start, eval **before** ES vs **after** ES on the same eval episodes to quantify ES contribution for each profile.
-
-4. **Rename policy class** or add a thin alias exported as `WordleCausalLMPolicy` with a deprecation note for `WordleGPT2Policy`.
-
-5. **Vocabulary experiment** (highest scientific priority): align secrets to `policy.words`, **`MAX_VOCAB` ≥ 64**, multi-seed; compare DistilGPT-2 vs Gemma at **matched** task and budget.
 
 ## ACT
 

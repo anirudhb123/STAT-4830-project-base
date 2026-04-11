@@ -19,7 +19,7 @@
 
 - **Naming and mental model.** The policy class remains **`WordleGPT2Policy`** while **`gemma_full`** loads Gemma. That is confusing in code reviews and reports; a neutral name (e.g. `WordleHFCausalPolicy`) would scale better.
 
-- **Smoke profile may bee too weak to validate ES behavior.** **`N_POP=4`**, **`N_ITERATIONS=2`**, **`n_eval_episodes=1`**, and **`WARM_START_STEPS=12`** produce almost no statistical signal. Smoke proves **plumbing**, not that **rank-normalized ES** is stable or improving the policy. Week 10’s critique about **noisy fitness** still applies; smoke amplifies variance.
+- **Smoke profile may be too weak to validate ES behavior.** **`N_POP=4`**, **`N_ITERATIONS=2`**, **`n_eval_episodes=1`**, and **`WARM_START_STEPS=12`** produce almost no statistical signal. Smoke proves **plumbing**, not that **rank-normalized ES** is stable or improving the policy. Week 10’s critique about **noisy fitness** still applies; smoke amplifies variance.
 
 - **No Gemma results in the report yet—by design for now.** The repo still reflects **smoke-tier** notebook output for quick validation. **Full-scale `gemma_full` jobs are in flight**; until they finish, any claim about Gemma + ES performance is **speculative**. The critique in Week 10 about needing real curves applies to what we **will** paste in after those runs land.
 

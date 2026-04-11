@@ -54,6 +54,61 @@ Run tests:
 pytest
 ```
 
+## Hugging Face (gated models + login)
+
+Use this when a notebook or script loads weights from the Hub (e.g. **Gemma**). You do **not** put a token in the repo or in a committed `.env` file.
+
+### 1. Account and model access
+
+1. Create a [Hugging Face](https://huggingface.co) account (or sign in).
+2. For **gated** models, open that model’s page while logged in (e.g. [google/gemma-3-1b-it](https://huggingface.co/google/gemma-3-1b-it)) and click **Agree and access** (or equivalent). Your account must be allowlisted for that checkpoint or downloads will fail even with a valid token.
+
+### 2. Create an access token
+
+1. Go to [Settings → Access Tokens](https://huggingface.co/settings/tokens).
+2. **Create new token** → choose **Read** (enough to download models).
+3. Copy the token once shown: it is one line, usually starting with **`hf_`**. You cannot see it again after leaving the page; if you lose it, create a new token and revoke the old one.
+
+### 3. Install the Hub CLI in your project venv
+
+Activate the repo’s `.venv` (see the quickstart sections above), then install into **that** environment:
+
+```bash
+python -m pip install -U huggingface_hub
+```
+
+Using `python -m pip` ensures packages land in the active venv, not a different Python on your PATH.
+
+### 4. Log in once (`hf`, not `huggingface-cli`)
+
+The old `huggingface-cli` command is deprecated. Use the **`hf`** tool from `huggingface_hub`:
+
+```bash
+hf auth login
+```
+
+- When prompted **Enter your token**, paste the **full** `hf_...` string. The cursor may not show characters; that is normal.
+- **Windows PowerShell / Terminal:** right-click in the window often pastes; paste **before** pressing Enter. If you press Enter with nothing pasted, login fails with errors like `Bearer` / empty token.
+- For **Add token as git credential?** you can answer **`N`** if you only use Python (`transformers` / `from_pretrained`). Answer **`Y`** only if you also use `git clone` / Git LFS against Hub repos and want Git to reuse the token.
+
+### 5. Check that it worked
+
+```bash
+hf auth whoami
+```
+
+You should see your Hugging Face username. After this, `from_pretrained(...)` can download gated weights; the token is stored in your user config (not in the repo).
+
+### 6. Troubleshooting (short)
+
+| Issue | What to try |
+|--------|-------------|
+| `Illegal header` / `Bearer` errors | Empty or partial paste — run `hf auth login` again and paste the full token once, then Enter. |
+| `403` / access denied on a model | Accept the model license on its Hub page (same account as the token). |
+| `hf` not found | Activate `.venv` first, then run `python -m pip install -U huggingface_hub` again. |
+
+Never commit tokens, never paste them into Discord/slack as screenshots of terminal output.
+
 ## Python file guide
 
 Top-level scripts:

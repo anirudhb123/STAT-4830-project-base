@@ -1,16 +1,18 @@
 """
-Wordle policy using a pretrained GPT-2–style model (e.g. GPT-2 / DistilGPT-2) plus a
-trainable linear head over a fixed 5-letter vocabulary. Optional PEFT LoRA on the last
-transformer blocks; otherwise the backbone is frozen and only the head is trained (e.g. ES).
+Wordle policy using a pretrained Hugging Face causal LM plus a trainable linear head
+over a fixed 5-letter vocabulary. Supports raw-text tokenization for GPT-2-style models
+and chat-template tokenization for instruction-tuned models such as Gemma.
 """
 
 from __future__ import annotations
+
+import inspect
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Optional, Tuple
 
 try:
     from .wordle_env import WordVocabulary, WordleState, MOCK_WORDLE_TARGETS
@@ -45,11 +47,11 @@ def _words_with_priority(
     return out
 
 try:
-    from transformers import AutoModel, AutoTokenizer
+    from transformers import AutoModelForCausalLM, AutoTokenizer
     TRANSFORMERS_AVAILABLE = True
 except ImportError:
     TRANSFORMERS_AVAILABLE = False
-    AutoModel = None  # type: ignore
+    AutoModelForCausalLM = None  # type: ignore
     AutoTokenizer = None  # type: ignore
 
 try:
@@ -79,11 +81,51 @@ def _build_wordle_prompt(state: WordleState, richer_prompt: bool = True) -> str:
     return "\n".join(lines)
 
 
+def _default_use_chat_template(model_name: str) -> bool:
+    lowered = model_name.lower()
+    return any(tag in lowered for tag in ("gemma", "instruct", "-it", "chat"))
+
+
+def _default_lora_targets(model_name: str) -> List[str]:
+    lowered = model_name.lower()
+    if "gpt2" in lowered:
+        return ["c_attn", "c_proj"]
+    if "gemma" in lowered:
+        return ["q_proj", "k_proj", "v_proj", "o_proj"]
+    raise ValueError(
+        "No default LoRA target modules are defined for "
+        f"{model_name!r}. Pass `lora_target_modules=` explicitly."
+    )
+
+
+def _filter_model_inputs(enc: Dict[str, torch.Tensor], allowed_keys: Sequence[str]) -> Dict[str, torch.Tensor]:
+    allowed = set(allowed_keys)
+    return {k: v for k, v in enc.items() if k in allowed}
+
+
+def _extract_last_hidden_state(model_output: Any) -> torch.Tensor:
+    last_hidden_state = getattr(model_output, "last_hidden_state", None)
+    if last_hidden_state is not None:
+        return last_hidden_state
+
+    hidden_states = getattr(model_output, "hidden_states", None)
+    if hidden_states:
+        return hidden_states[-1]
+
+    raise RuntimeError("Model output did not include hidden states.")
+
+
+def _last_non_padding_index(attention_mask: torch.Tensor) -> torch.Tensor:
+    positions = torch.arange(attention_mask.size(1), device=attention_mask.device).unsqueeze(0)
+    masked_positions = positions * attention_mask.long()
+    return masked_positions.max(dim=1).values
+
+
 class WordleGPT2Policy(nn.Module):
     """
-    GPT-2 / DistilGPT-2 encoder + trainable logits head over a vocabulary subset.
-    Optional LoRA on the last few transformer blocks (`use_lora=True`); otherwise the
-    backbone is frozen.
+    Hugging Face causal LM encoder + trainable logits head over a vocabulary subset.
+    Optional LoRA on model-specific projection layers (`use_lora=True`); otherwise the
+    backbone is frozen and only the head is trained.
 
     `state_embedding` arguments in `get_action` / `format_action_xml` are ignored; the
     model conditions on `WordleState` via the text prompt (same information as the env).
@@ -98,9 +140,14 @@ class WordleGPT2Policy(nn.Module):
         include_mock_targets_in_vocab: bool = True,
         extra_priority_words: Optional[List[str]] = None,
         richer_prompt: bool = True,
+        use_chat_template: Optional[bool] = None,
+        chat_generation_prompt: bool = True,
         use_lora: bool = False,
         lora_r: int = 4,
         lora_alpha: float = 16.0,
+        lora_target_modules: Optional[List[str]] = None,
+        tokenizer_kwargs: Optional[Dict[str, Any]] = None,
+        model_kwargs: Optional[Dict[str, Any]] = None,
     ):
         super().__init__()
         if not TRANSFORMERS_AVAILABLE:
@@ -126,19 +173,29 @@ class WordleGPT2Policy(nn.Module):
         self.vocab = full_vocab
 
         self.richer_prompt = richer_prompt
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.lm = AutoModel.from_pretrained(model_name)
+        self.use_chat_template = (
+            _default_use_chat_template(model_name)
+            if use_chat_template is None
+            else use_chat_template
+        )
+        self.chat_generation_prompt = chat_generation_prompt
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, **(tokenizer_kwargs or {}))
+        self.lm = AutoModelForCausalLM.from_pretrained(model_name, **(model_kwargs or {}))
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+        self._lm_forward_keys = tuple(inspect.signature(self.lm.forward).parameters.keys())
 
         self._lm_trainable = False
         if use_lora:
-            # LoRA on all blocks' c_attn / c_proj (Conv1D). layers_to_transform is omitted
-            # because several PEFT + GPT-2 builds fail to match targets when it is set.
+            target_modules = (
+                list(lora_target_modules)
+                if lora_target_modules is not None
+                else _default_lora_targets(model_name)
+            )
             peft_config = LoraConfig(
                 r=lora_r,
                 lora_alpha=int(lora_alpha),
-                target_modules=["c_attn", "c_proj"],
+                target_modules=target_modules,
                 lora_dropout=0.05,
                 bias="none",
             )
@@ -158,35 +215,55 @@ class WordleGPT2Policy(nn.Module):
 
     def encode_prompt(self, state: WordleState) -> dict:
         text = _build_wordle_prompt(state, richer_prompt=self.richer_prompt)
-        enc = self.tokenizer(
-            text,
-            return_tensors="pt",
-            truncation=True,
-            max_length=self.max_prompt_length,
-            padding="max_length",
-        )
-        return {k: v for k, v in enc.items()}
+        if self.use_chat_template:
+            if not hasattr(self.tokenizer, "apply_chat_template"):
+                raise RuntimeError(
+                    f"Tokenizer for {self._model_name!r} does not expose apply_chat_template()."
+                )
+            messages = [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": text}],
+                }
+            ]
+            enc = self.tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=self.chat_generation_prompt,
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt",
+                truncation=True,
+                max_length=self.max_prompt_length,
+                padding="max_length",
+            )
+        else:
+            enc = self.tokenizer(
+                text,
+                return_tensors="pt",
+                truncation=True,
+                max_length=self.max_prompt_length,
+                padding="max_length",
+            )
+        return _filter_model_inputs(dict(enc), self._lm_forward_keys)
 
     def forward_logits(self, state: WordleState) -> torch.Tensor:
         device = self.head.weight.device
         enc = self.encode_prompt(state)
-        input_ids = enc["input_ids"].to(device)
-        attn = enc.get("attention_mask")
-        if attn is not None:
-            attn = attn.to(device)
-
+        model_inputs = {k: v.to(device) for k, v in enc.items()}
+        attn = model_inputs.get("attention_mask")
         if self._lm_trainable:
-            out = self.lm(input_ids=input_ids, attention_mask=attn)
+            out = self.lm(**model_inputs, output_hidden_states=True, return_dict=True)
         else:
             with torch.no_grad():
-                out = self.lm(input_ids=input_ids, attention_mask=attn)
-        # Last non-padding position for the single sequence
+                out = self.lm(**model_inputs, output_hidden_states=True, return_dict=True)
+
+        last_hidden_state = _extract_last_hidden_state(out)
         if attn is not None:
-            seq_lens = attn.sum(dim=1).long() - 1
-            idx = seq_lens.clamp(min=0)
-            h = out.last_hidden_state[0, idx[0]]
+            idx = _last_non_padding_index(attn)
+            h = last_hidden_state[0, idx[0]]
         else:
-            h = out.last_hidden_state[0, -1]
+            h = last_hidden_state[0, -1]
+        h = h.to(self.head.weight.dtype)
         return self.head(h)
 
     def get_action(
@@ -255,3 +332,6 @@ class WordleGPT2Policy(nn.Module):
 
     def count_trainable_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
+WordleHFPolicy = WordleGPT2Policy

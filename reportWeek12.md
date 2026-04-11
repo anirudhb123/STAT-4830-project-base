@@ -1,6 +1,6 @@
 # Wordle with Gemma 3 1B IT, Device-Aware Loading, and Evolution Strategies
 
-**Status (this submission).** Week 12 work here is **implementation**: the notebook and policy wiring support **`RUN_PROFILE="gemma_full"`** with **`google/gemma-3-1b-it`**, chat templates, and device-aware loading. **We do not yet report numerical results for Gemma**—full-scale training jobs are **still running**; we will add curves and checkpoints once those complete. What we have validated end-to-end so far is the **smoke** profile (DistilGPT-2, tiny budget) as a pipeline check.
+**Status (this submission).** Week 12 work here is **implementation**: `notebooks/week12_implementation.ipynb` **defaults to `RUN_PROFILE="gemma_full"`** (`google/gemma-3-1b-it`, chat templates, device-aware loading). **`RUN_PROFILE="smoke"`** remains a fast DistilGPT-2 path for debugging. **We do not yet summarize numerical results for Gemma in this document**—full-scale training jobs are **still running**; we will add curves and checkpoints here once those complete.
 
 ## Problem Statement
 
@@ -41,7 +41,7 @@
 | Env episode counts | `num_train_examples=128`, `num_eval_examples=16` | `2000` / `20` |
 | `USE_LORA` (default in §2) | `False` | `False` |
 
-Global knobs in §2 still include `SIGMA=0.02`, `ALPHA=0.12`, `RICHER_PROMPT=True`, `FITNESS_OBJECTIVE="win_plus_return"`, `WIN_FITNESS_SCALE=8.0`, `MOCK_ENV=True`, `USE_LORA=False` unless you enable PEFT.
+Global knobs in §2 still include `SIGMA=0.02`, `ALPHA=0.12`, `RICHER_PROMPT=True`, `FITNESS_OBJECTIVE="win_plus_return"`, `WIN_FITNESS_SCALE=8.0`, `MOCK_ENV=True`, `USE_LORA=False` unless you enable PEFT. The hyperparameter cell sets **`RUN_PROFILE`** (default in the notebook source is **`gemma_full`**).
 
 **Artifacts.** Checkpoints save to `models/wordle_gpt2_es_head.<RUN_PROFILE>.pt` (head / optional LoRA state, `words`, `history`).
 
@@ -54,7 +54,7 @@ Global knobs in §2 still include `SIGMA=0.02`, `ALPHA=0.12`, `RICHER_PROMPT=Tru
 
 **Gemma (`gemma_full`).** No results are reported here yet: **full-scale Gemma training is in progress** (same budget intent as the **`gemma_full`** row in the table above). When those jobs finish, we will record **`history`**, plots, and **`models/wordle_gpt2_es_head.gemma_full.pt`** and update this section.
 
-**Smoke profile (implementation check only).** The notebook’s typical **checked-in** execution uses **`RUN_PROFILE="smoke"`** (DistilGPT-2, tiny ES budget), often on **CPU**, to **validate imports, env reset, warm-start, ES loop, and plotting**. That is **not** a scientific baseline comparable to Week 10’s longer DistilGPT-2 runs.
+**Smoke profile (optional quick check).** Set **`RUN_PROFILE="smoke"`** for DistilGPT-2 with a **tiny** ES budget—useful to **validate imports, env reset, warm-start, ES loop, and plotting** on modest hardware. That profile is **not** a scientific baseline comparable to Week 10’s longer DistilGPT-2 runs. **Saved notebook outputs** may reflect a **`gemma_full`** run (e.g. MPS/CUDA); this report still treats Gemma metrics as **pending** until jobs finish and we paste numbers below.
 
 **Expectation once Gemma runs complete (preview).** From Week 10, on the **eight-word mock** with substantial warm-start and ES budget, greedy eval can start strong after warm-start and ES may add a modest success-rate lift; we will see whether the same holds for Gemma 3 1B IT after hyperparameter and compute tuning.
 

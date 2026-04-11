@@ -21,7 +21,7 @@
 
 - **Smoke profile may be too weak to validate ES behavior.** **`N_POP=4`**, **`N_ITERATIONS=2`**, **`n_eval_episodes=1`**, and **`WARM_START_STEPS=12`** produce almost no statistical signal. Smoke proves **plumbing**, not that **rank-normalized ES** is stable or improving the policy. Week 10’s critique about **noisy fitness** still applies; smoke amplifies variance.
 
-- **No Gemma results in the report yet—by design for now.** The repo still reflects **smoke-tier** notebook output for quick validation. **Full-scale `gemma_full` jobs are in flight**; until they finish, any claim about Gemma + ES performance is **speculative**. The critique in Week 10 about needing real curves applies to what we **will** paste in after those runs land.
+- **No Gemma results in the report yet—by design for now.** The notebook **defaults to `gemma_full`**, so checked-in outputs may already show Gemma training progress; this write-up still **does not** state final success curves or multi-seed stats. **Full-scale `gemma_full` jobs are in flight**; until they finish, any performance claim in prose is **speculative**. The Week 10 critique about needing real curves applies to what we **will** add to **Initial Results** after those runs land.
 
 - **`gemma_full` + `MOCK_ENV=True` still uses an 8-word task.** Scaling the **model** without scaling **task difficulty** risks expensive runs that only show “large LM on a tiny classification problem.” The critique from Week 10—that **79% on 8 words** is not comparable to **156-word Week 6**—still applies to any Gemma mock-only numbers.
 

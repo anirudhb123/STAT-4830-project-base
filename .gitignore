@@ -3,3 +3,4 @@ __pycache__/
 .pytest_cache/
 *.pyc
 caveman.txt
+models/wordle_gemma_es_head_LoRA.*.pt

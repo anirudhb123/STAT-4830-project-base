@@ -131,6 +131,7 @@ class WordleEnvironmentWrapper:
         max_turns: int = 6,
         seed: Optional[int] = None,
         use_prime_intellect: bool = True,
+        target_pool: Optional[List[str]] = None,
     ):
         """
         Initialize Wordle environment.
@@ -141,13 +142,20 @@ class WordleEnvironmentWrapper:
             seed: Random seed for reproducibility
             use_prime_intellect: If False, never load verifiers; ``reset()`` uses
                 ``MOCK_WORDLE_TARGETS`` only (matches small policy vocabs).
+            target_pool: If provided, restrict secret words to this explicit list
+                (uppercased, deduped, 5-letter alphabetic only). Bypasses both
+                Prime Intellect loading and the canonical answer list, so it can
+                be used to align the env target distribution exactly with a
+                policy's truncated action vocabulary.
         """
         self.num_episodes = num_episodes
         self.max_turns = max_turns
         self.seed = seed
         
         self.prime_env = None
-        if use_prime_intellect:
+        if target_pool is not None:
+            self._install_local_target_pool(target_pool, announce=True)
+        elif use_prime_intellect:
             self._load_prime_environment()
         else:
             print(
@@ -160,6 +168,48 @@ class WordleEnvironmentWrapper:
         self.current_state = None
         self.episode_data = None
         
+    @staticmethod
+    def _normalize_target_pool(words: List[str]) -> List[str]:
+        """Uppercase, dedupe (preserving order), and keep only 5-letter alphabetic words."""
+        seen: set = set()
+        out: List[str] = []
+        for w in words:
+            if not isinstance(w, str):
+                continue
+            up = w.strip().upper()
+            if len(up) == 5 and up.isalpha() and up not in seen:
+                seen.add(up)
+                out.append(up)
+        return out
+
+    def _install_local_target_pool(self, words: List[str], announce: bool = False) -> None:
+        """Replace ``self.prime_env`` with a local backend whose dataset is ``words``."""
+        cleaned = self._normalize_target_pool(words)
+        if not cleaned:
+            raise ValueError(
+                "target_pool must contain at least one valid 5-letter alphabetic word."
+            )
+        ds = _LocalWordleDataset(targets=cleaned)
+        self.prime_env = _LocalWordleEnv(dataset=ds, eval_dataset=ds)
+        if announce:
+            print(
+                f"[OK] Local Wordle environment ready ({len(cleaned)} target words "
+                f"from explicit target_pool)."
+            )
+
+    def set_target_pool(self, words: List[str]) -> None:
+        """Replace the env's secret-word pool in place.
+
+        Used for curriculum learning: caller grows a policy's action vocabulary,
+        then calls this to keep the env's secret distribution aligned with the
+        policy's set of emittable words. ``current_state`` is reset so the next
+        ``reset()`` samples from the new pool.
+        """
+        self._install_local_target_pool(words, announce=False)
+        self.current_state = None
+        self.current_episode = 0
+        self.episode_data = None
+
     def _load_prime_environment(self):
         """Load the Prime Intellect Wordle environment, or a local fallback.
 
@@ -699,7 +749,8 @@ class WordVocabulary:
 def load_wordle_environment(
     num_train_examples: int = 2000,
     num_eval_examples: int = 20,
-    use_prime_intellect: bool = True
+    use_prime_intellect: bool = True,
+    target_pool: Optional[List[str]] = None,
 ) -> WordleEnvironmentWrapper:
     """
     Load Wordle environment with Prime Intellect verifiers or mock fallback.
@@ -708,6 +759,10 @@ def load_wordle_environment(
         num_train_examples: Number of training episodes
         num_eval_examples: Number of evaluation episodes  
         use_prime_intellect: Whether to use Prime Intellect backend
+        target_pool: Optional explicit list of secret words. When provided,
+            bypasses both Prime Intellect and the canonical answer list so the
+            env's secret distribution matches the caller-provided vocabulary
+            (e.g. a policy's truncated action set).
         
     Returns:
         Wrapped Wordle environment
@@ -716,4 +771,5 @@ def load_wordle_environment(
         num_episodes=num_train_examples,
         max_turns=6,
         use_prime_intellect=use_prime_intellect,
+        target_pool=target_pool,
     )

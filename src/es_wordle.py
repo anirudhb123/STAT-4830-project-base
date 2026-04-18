@@ -6,7 +6,7 @@ Adapted from the GridWorld ES implementation to work with Wordle.
 
 import torch
 import numpy as np
-from typing import Tuple, List, Dict
+from typing import Tuple, List, Dict, Optional, Sequence, Callable, Any
 
 
 def _trainable_params(policy):
@@ -345,3 +345,122 @@ def train_es_wordle(
             )
     
     return history
+
+
+# Keys produced by ``train_es_wordle`` that are appended once per ES iteration.
+_PER_ITER_KEYS = (
+    "train_iter",
+    "train_fitness",
+    "train_es_win",
+    "train_grad_norm",
+    "param_drift",
+    "pop_fitness_std",
+)
+# Keys produced once per eval checkpoint.
+_PER_EVAL_KEYS = (
+    "iteration",
+    "avg_fitness",
+    "eval_reward",
+    "eval_success",
+    "eval_turns",
+    "gradient_norm",
+)
+
+
+def train_curriculum(
+    policy,
+    env,
+    vocab_schedule: Sequence[int],
+    *,
+    n_iterations_per_stage: int,
+    warm_start_fn: Optional[Callable[..., Any]] = None,
+    warm_start_steps: int = 0,
+    warm_start_kwargs: Optional[Dict[str, Any]] = None,
+    verbose: bool = True,
+    **es_kwargs: Any,
+) -> Dict[str, List]:
+    """Curriculum ES: grow the policy/env vocabulary across stages.
+
+    For each ``N_i`` in ``vocab_schedule``:
+
+    1. ``policy.expand_vocab(N_i)`` (no-op if the policy is already that size).
+    2. ``env.set_target_pool(policy.words)`` so secrets are drawn from the
+       current action set.
+    3. If ``warm_start_fn`` is provided and the stage added new words, run
+       ``warm_start_fn(policy, env, n_steps=warm_start_steps, **warm_start_kwargs)``
+       to seed the freshly-allocated head rows.
+    4. ``train_es_wordle(policy, env, n_iterations=n_iterations_per_stage, **es_kwargs)``.
+
+    The combined history concatenates per-stage histories with iteration indices
+    offset to be globally monotonic, plus two new keys:
+        - ``stage_starts``: global iteration indices where each stage began.
+        - ``stage_vocab_sizes``: the vocabulary size at each stage.
+
+    LoRA adapters and the LM body persist across stages — only the linear head
+    grows, with old rows preserved by ``WordleGPT2Policy.expand_vocab``.
+    """
+    if not vocab_schedule:
+        raise ValueError("vocab_schedule must contain at least one stage size.")
+    if n_iterations_per_stage <= 0:
+        raise ValueError("n_iterations_per_stage must be positive.")
+
+    warm_start_kwargs = dict(warm_start_kwargs or {})
+
+    combined: Dict[str, List] = {k: [] for k in _PER_ITER_KEYS}
+    combined.update({k: [] for k in _PER_EVAL_KEYS})
+    combined["stage_starts"] = []
+    combined["stage_vocab_sizes"] = []
+
+    iter_offset = 0
+    for stage_idx, target_n in enumerate(vocab_schedule):
+        prev_n = len(policy.words)
+        new_n = policy.expand_vocab(int(target_n))
+        added = new_n - prev_n
+        env.set_target_pool(policy.words)
+
+        if verbose:
+            print(
+                f"\n=== Curriculum stage {stage_idx + 1}/{len(vocab_schedule)} "
+                f"| vocab: {prev_n} -> {new_n} (+{added}) ===",
+                flush=True,
+            )
+
+        if warm_start_fn is not None and warm_start_steps > 0 and (added > 0 or stage_idx == 0):
+            ws = warm_start_fn(
+                policy,
+                env,
+                n_steps=warm_start_steps,
+                **warm_start_kwargs,
+            )
+            if verbose and isinstance(ws, dict):
+                fitted = len(ws.get("loss", []))
+                skipped = ws.get("skipped", "?")
+                print(
+                    f"Warm-start (stage {stage_idx + 1}, vocab={new_n}): "
+                    f"fitted {fitted} steps; skipped {skipped}"
+                )
+
+        stage_history = train_es_wordle(
+            policy=policy,
+            env=env,
+            n_iterations=n_iterations_per_stage,
+            verbose=verbose,
+            **es_kwargs,
+        )
+
+        for k in _PER_ITER_KEYS:
+            if k == "train_iter":
+                combined[k].extend(int(i) + iter_offset for i in stage_history[k])
+            else:
+                combined[k].extend(stage_history[k])
+        for k in _PER_EVAL_KEYS:
+            if k == "iteration":
+                combined[k].extend(int(i) + iter_offset for i in stage_history[k])
+            else:
+                combined[k].extend(stage_history[k])
+
+        combined["stage_starts"].append(iter_offset)
+        combined["stage_vocab_sizes"].append(new_n)
+        iter_offset += n_iterations_per_stage
+
+    return combined

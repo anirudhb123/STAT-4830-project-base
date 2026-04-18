@@ -192,6 +192,9 @@ class WordleGPT2Policy(nn.Module):
             priority.extend(MOCK_WORDLE_TARGETS)
         if extra_priority_words:
             priority.extend(extra_priority_words)
+        # Snapshot priority so expand_vocab() can reproduce the same prefix
+        # ordering and preserve the append-only invariant when N grows.
+        self._priority: List[str] = list(priority)
         words = _words_with_priority(full_vocab, max_vocab_size, priority)
 
         self.words: List[str] = words
@@ -243,6 +246,55 @@ class WordleGPT2Policy(nn.Module):
 
         nn.init.orthogonal_(self.head.weight, gain=0.01)
         nn.init.zeros_(self.head.bias)
+
+    def expand_vocab(self, new_max_vocab_size: int) -> int:
+        """Grow the action vocabulary (and head) to ``new_max_vocab_size`` words.
+
+        The new word list is produced with the same priority + alphabetical-fill
+        rule used at construction, so it is guaranteed to be an append-only
+        extension of the current ``self.words``. Old head rows are copied
+        verbatim into the new head, and only the appended rows are freshly
+        initialized — so any prior ES / warm-start training on existing actions
+        is preserved across curriculum stages. LoRA adapters and the LM body
+        are untouched.
+
+        Returns:
+            The new ``self.action_dim``.
+        """
+        old_n = len(self.words)
+        if new_max_vocab_size <= old_n:
+            return self.action_dim
+
+        new_words = _words_with_priority(self.vocab, new_max_vocab_size, self._priority)
+        if new_words[:old_n] != self.words:
+            raise RuntimeError(
+                "expand_vocab: new word list is not an append-only extension of the "
+                "current vocabulary. Did the priority list or underlying vocab change?"
+            )
+        new_n = len(new_words)
+        if new_n == old_n:
+            return self.action_dim
+
+        weight = self.head.weight
+        bias = self.head.bias
+        in_features = weight.shape[1]
+        device = weight.device
+        dtype = weight.dtype
+
+        new_head = nn.Linear(in_features, new_n).to(device=device, dtype=dtype)
+        nn.init.orthogonal_(new_head.weight, gain=0.01)
+        nn.init.zeros_(new_head.bias)
+        with torch.no_grad():
+            new_head.weight[:old_n].copy_(weight)
+            if bias is not None and new_head.bias is not None:
+                new_head.bias[:old_n].copy_(bias)
+
+        self.head = new_head
+        self.words = new_words
+        self.word_to_idx = {w: i for i, w in enumerate(self.words)}
+        self.idx_to_word = {i: w for i, w in enumerate(self.words)}
+        self.action_dim = new_n
+        return self.action_dim
 
     def encode_prompt(self, state: WordleState) -> dict:
         text = _build_wordle_prompt(state, richer_prompt=self.richer_prompt)

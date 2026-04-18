@@ -1,49 +1,55 @@
 # Week 12 Self-Critique
 
-**Scope of this critique.** Week 12 is **implementation-complete** (profiles, Gemma path, device/dtype loading, checkpoints). **Gemma full-scale ES + warm-start results are not available yet**—those training jobs are **still running**. Judgments below separate **what the code enables** from **what we have measured**; the main gap is **pending Gemma metrics**, not missing plumbing.
+**Scope of this critique.** Week 12 ran two distinct Gemma 3 1B IT experiments: (A) `notebooks/week12_implementation.ipynb` — Gemma on the **8-word mock vocabulary** with **no LoRA** (head-only ES), which **worked** (~83% greedy success at iter 9, `ES_win` from 68.8% to 93.8%); and (B) `notebooks/week12_implementation_LoRARun.ipynb` — Gemma on the **full Wordle vocabulary** with a **LoRA rank sweep** (r=4, 16, 32), which **failed** (~0% greedy success across all ranks, `ES_win` essentially 0%). The DistilGPT-2 smoke profile in either notebook is plumbing-only and not a research baseline. The critique below focuses on what made (A) succeed but (B) collapse.
 
 ## ORIENT
 
 ### Strengths
 
-- **Run profiles directly address Week 10 workflow pain.** The **`RUN_PROFILE`** switch (`smoke` vs `gemma_full`) separates “does the notebook run end-to-end?” from “are we doing a serious experiment?” without maintaining two separate notebooks. This is a practical response to the Week 10 critique that full LM + ES is slow and hard to iterate on.
+- **Notebook A is a real positive result.** Gemma + head-only ES on the 8-word mock vocabulary reaches ~83% greedy success at iter 9 with rising `ES_win` (68.8% -> 93.8%). The Gemma backbone, chat-template prompts, warm-start, and ES loop all behave as intended end-to-end on this task.
 
-- **Denser eval logging in smoke mode.** With **`EVAL_EVERY=1`** and a short **`N_ITERATIONS`**, the eval curves actually have enough points to **see shape** during debugging. That partially fixes the Week 10 issue where **`EVAL_EVERY=10`** and **`N_ITERATIONS=10`** produced only **two** eval checkpoints—too sparse to interpret learning dynamics.
+- **Run profiles directly address Week 10 workflow pain.** The **`RUN_PROFILE`** switch (`smoke` vs `gemma_full`) separates "does the notebook run end-to-end?" from "are we doing a serious experiment?" without maintaining a dedicated debug notebook. DistilGPT-2 smoke is plumbing-only; the real Gemma runs are in the two `gemma_full` configurations.
 
-- **Gemma IT path is structurally supported.** `USE_CHAT_TEMPLATE` and **`CHAT_GENERATION_PROMPT`** wired into `WordleGPT2Policy` match how instruction-tuned models expect prompts, which matters for **`google/gemma-3-1b-it`** in **`gemma_full`**. That is a meaningful extension beyond “always format like GPT-2.”
+- **Two-notebook split lets us compare configurations cleanly.** Keeping the head-only mock run (`week12_implementation.ipynb`) separate from the full-vocab LoRA sweep (`week12_implementation_LoRARun.ipynb`) makes the contrast between the working and failing setups easy to point at.
 
-- **Checkpoint isolation by profile.** Saving to **`models/wordle_gpt2_es_head.<RUN_PROFILE>.pt`** prevents a smoke run from clobbering a long Gemma checkpoint—a small change that avoids silent data loss.
+- **Gemma IT + LoRA path is runnable end-to-end.** `USE_CHAT_TEMPLATE`, `CHAT_GENERATION_PROMPT`, and PEFT LoRA adapters are wired and executable, so the failure of the LoRA sweep is about training behavior and experiment design, not missing integration.
+
+- **Checkpoint isolation by profile.** Saving to **`models/wordle_gemma_es_head.<RUN_PROFILE>.pt`** prevents a smoke run from clobbering a long Gemma checkpoint — a small change that avoids silent data loss.
 
 
 ### Areas for Improvement
 
-- **Naming and mental model.** The policy class remains **`WordleGPT2Policy`** while **`gemma_full`** loads Gemma. That is confusing in code reviews and reports; a neutral name (e.g. `WordleHFCausalPolicy`) would scale better.
+- **The full-vocabulary LoRA sweep did not work.** Under Notebook B's setting (`MOCK_ENV=False`, full vocab, Gemma + LoRA, ranks 4/16/32), greedy `Success` stayed at 0% across all ranks and `ES_win` stayed near 0%. The "best rank" reported by the sweep (r=4) is best only by tie-breaking among zero-success runs — it should not be read as a real LoRA recommendation.
 
-- **Smoke profile may be too weak to validate ES behavior.** **`N_POP=4`**, **`N_ITERATIONS=2`**, **`n_eval_episodes=1`**, and **`WARM_START_STEPS=12`** produce almost no statistical signal. Smoke proves **plumbing**, not that **rank-normalized ES** is stable or improving the policy. Week 10’s critique about **noisy fitness** still applies; smoke amplifies variance.
+- **Train/test split isolation is weak.** The process does not enforce a persistent, auditable disjoint train/eval word split for the full-vocabulary run. Without strict split isolation, future improvements on Notebook B's regime will be hard to interpret as true generalization instead of overlap or distribution leakage.
 
-- **No Gemma results in the report yet—by design for now.** The notebook **defaults to `gemma_full`**, so checked-in outputs may already show Gemma training progress; this write-up still **does not** state final success curves or multi-seed stats. **Full-scale `gemma_full` jobs are in flight**; until they finish, any performance claim in prose is **speculative**. The Week 10 critique about needing real curves applies to what we **will** add to **Initial Results** after those runs land.
+- **Curriculum learning is likely necessary between Notebook A and Notebook B.** We jumped directly from an 8-word task (where Gemma + head-only ES works) to the full ~2k-word vocabulary with LoRA enabled (where nothing learns). A staged curriculum (small vocab -> medium vocab -> full vocab), with weights carried forward, would likely produce a smoother optimization path and better signal for ES instead of collapsing two scaling decisions into one experiment.
 
-- **`gemma_full` + `MOCK_ENV=True` still uses an 8-word task.** Scaling the **model** without scaling **task difficulty** risks expensive runs that only show “large LM on a tiny classification problem.” The critique from Week 10—that **79% on 8 words** is not comparable to **156-word Week 6**—still applies to any Gemma mock-only numbers.
+- **Notebook B confounds vocabulary scaling and LoRA.** Going from Notebook A to Notebook B simultaneously changed the vocabulary (8 -> ~2k actions) and enabled LoRA. The failure cannot be attributed to either alone without further runs.
 
-- **MPS / CPU dtype path.** `default_model_load_kwargs` returns float32 when not on CUDA; that is fine, but very large models on MPS may need explicit documentation (memory, speed) so users do not assume Gemma will be usable on laptop GPUs without tuning.
+- **DistilGPT-2 smoke profile has low statistical power and is not a baseline.** `N_POP=4`, `N_ITERATIONS=2`, and very short warm-start make `RUN_PROFILE="smoke"` useful only for plumbing checks. It should not be cited as evidence about ES dynamics or model quality.
 
 ### Critical Risks / Assumptions
 
-- **Assumption:** Chat-templated prompts for Gemma preserve the same **semantic content** as the plain prompt path (constraints, guesses, feedback). If template tokens or role boundaries **change truncation behavior** (`MAX_PROMPT_LENGTH`), comparisons across **`smoke`** vs **`gemma_full`** are not apples-to-apples without checking truncated prompt logs.
+- **Risk:** Without strict train/test split isolation on the full-vocabulary task, we cannot make strong generalization claims even if Notebook B's headline metrics rise in future runs.
 
-- **Risk:** **`gemma_full`** default **`USE_LORA=False`** means ES still perturbs mainly the **head**; running Gemma largely frozen may **underuse** the larger backbone unless LoRA or longer training is added—while still paying **full forward-pass** cost.
+- **Risk:** Going straight to full-vocabulary optimization with LoRA enabled can hide whether failure comes from vocabulary size, LoRA capacity, reward shaping, or optimization horizon; the current Notebook A vs Notebook B contrast collapses several of these factors into one experiment.
 
-- **Risk:** Same as Week 10: validating only on **mock eight-word** Wordle does not test whether **LM + ES** beats **MLP + ES** on a harder vocabulary. The Week 12 stack could be **engineering-complete** but **scientifically unvalidated** on the hard regime.
+- **Assumption:** The 8-word mock vocabulary success in Notebook A transfers in any informative way to the full vocabulary. Mock-task win rate may overstate how close the policy is to playing real Wordle.
+
+- **Assumption:** Chat-templated prompting for Gemma preserves the same effective signal as plain prompts. If template overhead or truncation changes usable context at full vocabulary, training quality can degrade independently of ES.
 
 ## DECIDE
 
 ### Concrete Next Actions
 
-1. **Complete in-progress `gemma_full` GPU runs**; with fixed seed, commit or appendix **one** full `history` + plot set and refresh `reportWeek12.md` **Initial Results**. (The report already states results are pending while jobs run.)
+1. **Create strict split artifacts first.** Generate and save fixed disjoint train/eval word lists for the full Wordle vocabulary, reuse them across seeds, and report metrics only on the held-out split.
 
-2. **Add a mid profile** (e.g. `distil_full`): Week 10 hyperparameters + **`EVAL_EVERY=2` or `5`** on DistilGPT-2 for **cheap** but meaningful ES curves—bridging smoke and Gemma.
+2. **Introduce explicit curriculum stages between Notebook A and Notebook B.** Run a sequence such as 8 -> 64 -> 256 -> full vocabulary, carrying weights forward and logging where performance collapses. This bridges the gap between the working mock-vocab regime and the failing full-vocab regime.
 
-3. **Warm-start-only ablation** (carried from Week 10): after warm-start, eval **before** ES vs **after** ES on the same eval episodes to quantify ES contribution for each profile.
+3. **Decouple LoRA from vocabulary scaling.** Add a Gemma + LoRA run on the 8-word mock task and a Gemma head-only run on the full vocabulary so the cause of Notebook B's failure (vocabulary size vs LoRA vs both) can be isolated.
+
+4. **Run warm-start vs ES ablations under the same split.** Evaluate after warm-start and after ES on identical held-out episodes to determine whether ES adds signal in each regime.
 
 ## ACT
 

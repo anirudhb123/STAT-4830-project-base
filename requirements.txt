@@ -3,5 +3,6 @@ matplotlib
 numpy
 pytest
 jupyter
+jinja2>=3.1.0
 transformers>=4.50.0
 peft

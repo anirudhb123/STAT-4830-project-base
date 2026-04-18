@@ -7,6 +7,7 @@ and chat-template tokenization for instruction-tuned models such as Gemma.
 from __future__ import annotations
 
 import inspect
+import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -98,6 +99,34 @@ def _default_lora_targets(model_name: str) -> List[str]:
     )
 
 
+def _version_tuple(version: str) -> Tuple[int, ...]:
+    parts = []
+    for piece in version.split("."):
+        match = re.match(r"(\d+)", piece)
+        if not match:
+            break
+        parts.append(int(match.group(1)))
+    return tuple(parts)
+
+
+def _require_jinja2_for_chat_templates() -> None:
+    try:
+        import jinja2
+    except ImportError as exc:
+        raise ImportError(
+            "Chat-template tokenization requires `jinja2>=3.1.0`. "
+            "Install or upgrade it with: `python -m pip install -U 'jinja2>=3.1.0'`."
+        ) from exc
+
+    installed = getattr(jinja2, "__version__", "0")
+    if _version_tuple(installed) < (3, 1, 0):
+        raise ImportError(
+            "Chat-template tokenization requires `jinja2>=3.1.0`, "
+            f"but found {installed}. Upgrade it with: "
+            "`python -m pip install -U 'jinja2>=3.1.0'`."
+        )
+
+
 def _filter_model_inputs(enc: Dict[str, torch.Tensor], allowed_keys: Sequence[str]) -> Dict[str, torch.Tensor]:
     allowed = set(allowed_keys)
     return {k: v for k, v in enc.items() if k in allowed}
@@ -178,6 +207,8 @@ class WordleGPT2Policy(nn.Module):
             if use_chat_template is None
             else use_chat_template
         )
+        if self.use_chat_template:
+            _require_jinja2_for_chat_templates()
         self.chat_generation_prompt = chat_generation_prompt
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, **(tokenizer_kwargs or {}))
         self.lm = AutoModelForCausalLM.from_pretrained(model_name, **(model_kwargs or {}))

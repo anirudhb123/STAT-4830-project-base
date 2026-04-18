@@ -2,10 +2,16 @@
 Wordle environment wrapper for Prime Intellect's verifiers.
 
 This module provides an adapter between Prime Intellect's Wordle environment
-and our RL training infrastructure.
+and our RL training infrastructure. When the ``verifiers`` package (or its
+Wordle env) is not installed, the wrapper falls back to a bundled canonical
+NYT Wordle answer list at ``data/wordle_answers.txt``, which is sufficient
+for end-to-end training and evaluation since the gameplay logic in this file
+is self-contained.
 """
 
+import os
 import re
+from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass, field
 
@@ -23,6 +29,78 @@ except ImportError:
 MOCK_WORDLE_TARGETS = [
     "CRANE", "SLATE", "TRACE", "AUDIO", "PLANT", "HEART", "LIGHT", "DREAM",
 ]
+
+
+# Cached on first read to avoid hitting disk every reset().
+_LOCAL_TARGETS_CACHE: Optional[List[str]] = None
+
+
+def _local_answers_path() -> Path:
+    """Return the path to the bundled canonical Wordle answer list."""
+    # ``src/wordle_env.py`` -> repo root is two levels up.
+    return Path(__file__).resolve().parent.parent / "data" / "wordle_answers.txt"
+
+
+def load_canonical_wordle_answers() -> List[str]:
+    """
+    Load the bundled canonical Wordle answer list (~2,300 words, UPPER-CASE).
+
+    Returns an empty list if the data file is missing or unreadable. Comments
+    (lines starting with ``#``) and blank lines are skipped, and only valid
+    5-letter alphabetic entries are kept.
+    """
+    global _LOCAL_TARGETS_CACHE
+    if _LOCAL_TARGETS_CACHE is not None:
+        return _LOCAL_TARGETS_CACHE
+
+    path = _local_answers_path()
+    words: List[str] = []
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            entry = raw.strip()
+            if not entry or entry.startswith("#"):
+                continue
+            if len(entry) == 5 and entry.isalpha():
+                words.append(entry.upper())
+    except OSError:
+        words = []
+
+    _LOCAL_TARGETS_CACHE = words
+    return words
+
+
+@dataclass
+class _LocalWordleDataset:
+    """Minimal stand-in for the ``verifiers`` Wordle dataset.
+
+    Exposes the subset of attributes ``WordleEnvironmentWrapper`` and
+    ``WordVocabulary`` actually consume: ``__len__`` / ``__getitem__`` returning
+    dicts with ``target`` (and a generic ``prompt``) keys.
+    """
+
+    targets: List[str]
+
+    def __len__(self) -> int:
+        return len(self.targets)
+
+    def __getitem__(self, idx: int) -> Dict[str, str]:
+        target = self.targets[idx]
+        return {
+            "target": target,
+            "prompt": "Guess a 5-letter word. You have 6 attempts.",
+        }
+
+    def __iter__(self):
+        for i in range(len(self.targets)):
+            yield self[i]
+
+
+@dataclass
+class _LocalWordleEnv:
+    """Minimal stand-in for the ``verifiers`` Wordle environment."""
+
+    dataset: _LocalWordleDataset
+    eval_dataset: _LocalWordleDataset
 
 
 @dataclass
@@ -83,29 +161,48 @@ class WordleEnvironmentWrapper:
         self.episode_data = None
         
     def _load_prime_environment(self):
-        """Load the Prime Intellect Wordle environment."""
+        """Load the Prime Intellect Wordle environment, or a local fallback.
+
+        The Prime Intellect ``verifiers`` Wordle env is only used as a *source
+        of target words* by this wrapper — all gameplay (feedback, rewards,
+        episode termination) is implemented locally in ``_simulate_prime_step``
+        / ``_generate_wordle_feedback``. So whenever ``verifiers`` (or its
+        Wordle env package) cannot be imported, we silently fall back to the
+        bundled canonical Wordle answer list, which is good enough for full
+        training runs (~2,300 targets).
+        """
+        prime_loaded = False
         try:
-            import os
-            from verifiers import load_environment
-            
-            # Set NLTK data path to venv
+            from verifiers import load_environment  # type: ignore
+
             nltk_data_path = os.path.join(os.getcwd(), '.venv', 'nltk_data')
             if os.path.exists(nltk_data_path):
                 os.environ['NLTK_DATA'] = nltk_data_path
-            
-            # Load environment (it takes env_id only, no args)
-            self.prime_env = load_environment("wordle")
-            print("[OK] Successfully loaded Prime Intellect Wordle environment")
-            print(f"  Training examples: {len(self.prime_env.dataset) if hasattr(self.prime_env, 'dataset') else 'N/A'}")
-            print(f"  Eval examples: {len(self.prime_env.eval_dataset) if hasattr(self.prime_env, 'eval_dataset') else 'N/A'}")
+
+            try:
+                self.prime_env = load_environment("wordle")
+                prime_loaded = True
+                print("[OK] Successfully loaded Prime Intellect Wordle environment")
+                if hasattr(self.prime_env, 'dataset'):
+                    print(f"  Training examples: {len(self.prime_env.dataset)}")
+                if hasattr(self.prime_env, 'eval_dataset'):
+                    print(f"  Eval examples: {len(self.prime_env.eval_dataset)}")
+            except Exception as e:  # ValueError from missing env package, etc.
+                print(f"[INFO] Prime Intellect 'wordle' env not available ({e.__class__.__name__}); using bundled answer list.")
         except ImportError:
-            print("WARNING: Prime Intellect verifiers not installed. Using mock environment.")
-            print("Install with: uv pip install verifiers>=0.1.9")
-            self.prime_env = None
-        except Exception as e:
-            print(f"WARNING: Could not load Wordle environment: {e}")
-            print("Using mock environment for testing.")
-            self.prime_env = None
+            print("[INFO] verifiers package not installed; using bundled Wordle answer list.")
+
+        if not prime_loaded:
+            words = load_canonical_wordle_answers()
+            if not words:
+                print(
+                    "WARNING: bundled answer list at data/wordle_answers.txt "
+                    "is empty or missing. Falling back to MOCK_WORDLE_TARGETS."
+                )
+                words = list(MOCK_WORDLE_TARGETS)
+            ds = _LocalWordleDataset(targets=words)
+            self.prime_env = _LocalWordleEnv(dataset=ds, eval_dataset=ds)
+            print(f"[OK] Local Wordle environment ready ({len(words)} target words).")
     
     def reset(self) -> WordleState:
         """
@@ -404,14 +501,23 @@ class WordVocabulary:
         self.idx_to_word = {idx: word for word, idx in self.word_to_idx.items()}
     
     def _load_prime_targets(self) -> List[str]:
-        """Load vocabulary from Prime Intellect's Wordle dataset."""
+        """Load vocabulary of valid target words.
+
+        Tries the Prime Intellect ``verifiers`` Wordle dataset first; if that
+        package (or its Wordle env) isn't installed, silently falls back to
+        the bundled canonical NYT answer list at ``data/wordle_answers.txt``.
+        Only reverts to the small hand-coded ``_load_common_words`` list if
+        both sources are unavailable.
+        """
         try:
-            from verifiers import load_environment
-            import os
-            os.environ.setdefault('NLTK_DATA', os.path.join(os.getcwd(), '.venv', 'nltk_data'))
-            
+            from verifiers import load_environment  # type: ignore
+
+            os.environ.setdefault(
+                'NLTK_DATA', os.path.join(os.getcwd(), '.venv', 'nltk_data')
+            )
+
             env = load_environment('wordle')
-            
+
             def _episode_target(episode: Any) -> Optional[str]:
                 target = episode.get('target', episode.get('answer', ''))
                 if isinstance(target, list):
@@ -432,11 +538,19 @@ class WordVocabulary:
                     if t:
                         targets.add(t)
 
-            words = sorted(list(targets))
+            words = sorted(targets)
             print(f"[OK] Loaded {len(words)} words from Prime Intellect dataset")
             return words
-            
+
         except Exception as e:
+            local = load_canonical_wordle_answers()
+            if local:
+                print(
+                    f"[INFO] Using bundled Wordle answer list "
+                    f"({len(local)} words); Prime Intellect not available "
+                    f"({e.__class__.__name__})."
+                )
+                return sorted(set(local))
             print(f"Could not load Prime Intellect targets: {e}")
             print("Falling back to common words list")
             return self._load_common_words()

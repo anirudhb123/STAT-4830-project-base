@@ -330,9 +330,26 @@ class WordleGPT2Policy(nn.Module):
         return _filter_model_inputs(dict(enc), self._lm_forward_keys)
 
     def forward_logits(self, state: WordleState) -> torch.Tensor:
+        return self.forward_logits_batch([state])[0]
+
+    def forward_logits_batch(self, states: Sequence[WordleState]) -> torch.Tensor:
+        """Batched logits over a list of states. Returns ``[B, action_dim]``.
+
+        All prompts are produced by ``encode_prompt`` (which already pads to
+        ``max_prompt_length``), then concatenated along the batch dim and run
+        through a single LM forward. The last non-padding hidden state of each
+        row is gathered and passed through the shared head.
+        """
+        if not states:
+            raise ValueError("forward_logits_batch requires at least one state.")
         device = self.head.weight.device
-        enc = self.encode_prompt(state)
-        model_inputs = {k: v.to(device) for k, v in enc.items()}
+        encs = [self.encode_prompt(s) for s in states]
+        keys = encs[0].keys()
+        if not all(set(e.keys()) == set(keys) for e in encs):
+            raise RuntimeError("encode_prompt returned inconsistent keys across states.")
+        model_inputs = {
+            k: torch.cat([e[k] for e in encs], dim=0).to(device) for k in keys
+        }
         attn = model_inputs.get("attention_mask")
         if self._lm_trainable:
             out = self.lm(**model_inputs, output_hidden_states=True, return_dict=True)
@@ -340,12 +357,13 @@ class WordleGPT2Policy(nn.Module):
             with torch.no_grad():
                 out = self.lm(**model_inputs, output_hidden_states=True, return_dict=True)
 
-        last_hidden_state = _extract_last_hidden_state(out)
+        last_hidden_state = _extract_last_hidden_state(out)  # [B, T, H]
         if attn is not None:
-            idx = _last_non_padding_index(attn)
-            h = last_hidden_state[0, idx[0]]
+            idx = _last_non_padding_index(attn)  # [B]
+            batch_arange = torch.arange(last_hidden_state.size(0), device=last_hidden_state.device)
+            h = last_hidden_state[batch_arange, idx]
         else:
-            h = last_hidden_state[0, -1]
+            h = last_hidden_state[:, -1]
         h = h.to(self.head.weight.dtype)
         return self.head(h)
 
@@ -360,10 +378,12 @@ class WordleGPT2Policy(nn.Module):
             raise ValueError("WordleGPT2Policy.get_action requires `state=WordleState` (embedding is unused).")
         logits = self.forward_logits(state)
         if previous_guesses:
+            # Single clone before in-place masking: avoids a fresh allocation per
+            # masked guess (was up to 5 clones per call on the last turn).
+            logits = logits.clone()
             for g in previous_guesses:
                 u = g.upper()
                 if u in self.word_to_idx:
-                    logits = logits.clone()
                     logits[self.word_to_idx[u]] = -float("inf")
 
         probs = F.softmax(logits, dim=-1)

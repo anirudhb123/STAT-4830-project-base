@@ -416,13 +416,14 @@ def train_es_wordle(
     antithetic: bool = False,
     common_random_numbers: bool = False,
     ema_beta: float = 0.0,
+    env_eval: Optional[Any] = None,
 ) -> Dict[str, List]:
     """
     Train policy using Evolution Strategies on Wordle.
     
     Args:
         policy: WordleDiscretePolicy to train
-        env: WordleEnvironmentWrapper
+        env: WordleEnvironmentWrapper used for ES rollouts (training secret pool)
         N: Population size
         sigma: Noise scale
         alpha: Learning rate
@@ -445,10 +446,14 @@ def train_es_wordle(
             gradient is bias-corrected ``g_ema / (1 - β^(t+1))`` so the persistent component of
             successive estimates accumulates while their noise averages out. ``ema_beta=0`` (default)
             reproduces the original no-momentum behavior.
+        env_eval: Optional separate env for periodic eval. When provided, periodic eval rollouts
+            sample secrets from ``env_eval`` (e.g. a held-out pool) while ES rollouts continue to
+            use ``env`` (the training pool). When None, periodic eval uses ``env`` (legacy behavior).
 
     Returns:
         history: Dictionary with training history
     """
+    eval_env = env_eval if env_eval is not None else env
     # Flattened trainable parameters
     params = torch.cat([p.flatten() for p in _trainable_params(policy)])
     params_init = params.clone()
@@ -546,7 +551,7 @@ def train_es_wordle(
             if hasattr(policy, "forward_logits_batch") and eval_n_episodes > 1:
                 eval_rewards, eval_successes, eval_turn_counts = _rollout_batched(
                     policy,
-                    env,
+                    eval_env,
                     eval_n_episodes,
                     max_turns,
                     deterministic=eval_deterministic,
@@ -559,14 +564,14 @@ def train_es_wordle(
                 policy.eval()
                 with torch.no_grad():
                     for _ in range(eval_n_episodes):
-                        state = env.reset()
+                        state = eval_env.reset()
                         episode_reward = 0
                         done = False
                         turns = 0
                         info: dict = {}
 
                         while not done and turns < max_turns:
-                            state_embedding = env.get_state_embedding(state)
+                            state_embedding = eval_env.get_state_embedding(state)
 
                             if hasattr(policy, 'format_action_xml'):
                                 action_xml, _ = policy.format_action_xml(
@@ -579,7 +584,7 @@ def train_es_wordle(
                                 word = policy.vocab.action_to_word(action_idx)
                                 action_xml = f"<guess>{word}</guess>"
 
-                            state, reward, done, info = env.step(action_xml)
+                            state, reward, done, info = eval_env.step(action_xml)
                             episode_reward += reward
                             turns += 1
 
@@ -668,21 +673,35 @@ def train_curriculum(
     verbose: bool = True,
     post_warm_start_eval_episodes: int = 50,
     post_warm_start_eval_deterministic: bool = True,
+    env_eval: Optional[Any] = None,
+    secret_holdout_frac: float = 0.0,
+    expand_action_space: bool = True,
     **es_kwargs: Any,
 ) -> Dict[str, List]:
     """Curriculum ES: grow the policy/env vocabulary across stages.
 
     For each ``N_i`` in ``vocab_schedule``:
 
-    1. ``policy.expand_vocab(N_i)`` (no-op if the policy is already that size).
-    2. ``env.set_target_pool(policy.words)`` so secrets are drawn from the
-       current action set.
-    3. If ``warm_start_fn`` is provided and the stage added new words, run
-       ``warm_start_fn(policy, env, n_steps=warm_start_steps, **warm_start_kwargs)``
-       to seed the freshly-allocated head rows.
-    4. Quick post-warm-start eval (greedy by default) using ``quick_eval_success``
-       — logged so the contribution of warm-start vs ES is attributable per stage.
-    5. ``train_es_wordle(policy, env, n_iterations=iters_for_stage, **es_kwargs)``.
+    1. If ``expand_action_space`` is True (default, legacy behavior),
+       ``policy.expand_vocab(N_i)`` (no-op if the policy is already that size).
+       If False, the policy's action space is left untouched (caller is
+       responsible for sizing it before this call); only the env's secret
+       pool is re-targeted per stage.
+    2. ``env.set_target_pool(...)``: when ``secret_holdout_frac > 0``, the
+       slice ``policy.words[:N_i]`` is partitioned into
+       ``ws_pool = words[:-n_eval]`` and ``eval_pool = words[-n_eval:]``,
+       with ``n_eval = max(2, round(N_i * secret_holdout_frac))``;
+       ``env`` is set to ``ws_pool`` and ``env_eval`` (if provided) is set
+       to ``eval_pool``. When ``secret_holdout_frac == 0`` the legacy
+       behavior holds: ``env`` is set to all ``policy.words[:N_i]``
+       (i.e. ``policy.words`` when ``expand_action_space=True``).
+    3. If ``warm_start_fn`` is provided and the stage's training pool changed,
+       run ``warm_start_fn(policy, env, n_steps=warm_start_steps, **warm_start_kwargs)``
+       to seed the head on the training secret distribution.
+    4. Quick post-warm-start eval using ``quick_eval_success``: held-out (on
+       ``env_eval``) is the headline number, in-distribution (on ``env``) is
+       logged for comparison so the memorization gap is visible per stage.
+    5. ``train_es_wordle(policy, env, env_eval=env_eval, n_iterations=iters_for_stage, **es_kwargs)``.
 
     ``n_iterations_per_stage`` may be either:
         - an ``int`` (same iter budget for every stage), or
@@ -702,19 +721,55 @@ def train_curriculum(
     value, which makes the start-of-stage ES iter strongly correlated across
     stages and obscures stage-to-stage progress. Set to 0 to disable.
 
+    ``env_eval`` is an optional separate env used for periodic eval (both the
+    post-warm-start probe and the eval rollouts inside ``train_es_wordle``).
+    With ``secret_holdout_frac > 0`` it should be a fresh env identical in
+    construction to ``env`` so per-stage ``set_target_pool`` calls can swap in
+    the held-out pool without touching the training env.
+
+    ``secret_holdout_frac`` controls the per-stage train/held-out split on the
+    secret pool. 0.0 (default) reproduces the legacy behavior. Values in
+    ``(0, 0.5)`` partition the stage-k pool ``policy.words[:N_k]`` into a
+    deterministic prefix (training secrets) and suffix (held-out secrets).
+
+    ``expand_action_space`` (default True) controls whether each stage calls
+    ``policy.expand_vocab(N_i)``. Set False when the policy is pre-built with
+    its final action space (e.g. ``max_vocab_size=MAX_VOCAB``) and only the
+    secret pool should grow under the curriculum.
+
     The combined history concatenates per-stage histories with iteration indices
-    offset to be globally monotonic, plus four extra keys:
+    offset to be globally monotonic, plus extra keys:
         - ``stage_starts``: global iteration indices where each stage began.
-        - ``stage_vocab_sizes``: the vocabulary size at each stage.
+        - ``stage_vocab_sizes``: the policy action_dim at each stage (constant
+          when ``expand_action_space=False``).
+        - ``stage_secret_pool_sizes``: the size of the stage's training
+          secret pool (``ws_pool``).
+        - ``stage_eval_pool_sizes``: the size of the stage's held-out secret
+          pool (0 when ``secret_holdout_frac == 0`` or ``env_eval is None``).
         - ``post_warmstart_success``: greedy eval_success right after warm-start
-          for each stage (0 if no warm-start ran). Pair with ``eval_success`` at
-          the matching stage end to attribute progress between warm-start and ES.
+          for each stage. Held-out value when both ``env_eval`` and a non-zero
+          ``secret_holdout_frac`` are configured; otherwise in-distribution
+          (legacy meaning).
+        - ``post_warmstart_success_heldout``: held-out post-WS eval (NaN when
+          ``env_eval is None`` or ``secret_holdout_frac == 0``).
+        - ``post_warmstart_success_indist``: in-distribution post-WS eval on
+          ``env`` (the training pool).
         - ``stage_post_warmstart_iter``: global iter index where each stage's
           post-warm-start eval was taken (= ``stage_starts[stage]``).
 
     LoRA adapters and the LM body persist across stages — only the linear head
-    grows, with old rows preserved by ``WordleGPT2Policy.expand_vocab``.
+    grows when ``expand_action_space=True``, with old rows preserved by
+    ``WordleGPT2Policy.expand_vocab``.
     """
+    if not 0.0 <= secret_holdout_frac < 0.5:
+        raise ValueError(
+            f"secret_holdout_frac must be in [0, 0.5), got {secret_holdout_frac}."
+        )
+    if secret_holdout_frac > 0 and env_eval is None:
+        raise ValueError(
+            "secret_holdout_frac > 0 requires env_eval to be provided so the "
+            "held-out secret pool can be installed without polluting training."
+        )
     if not vocab_schedule:
         raise ValueError("vocab_schedule must contain at least one stage size.")
 
@@ -767,28 +822,76 @@ def train_curriculum(
     combined.update({k: [] for k in _PER_EVAL_KEYS})
     combined["stage_starts"] = []
     combined["stage_vocab_sizes"] = []
+    combined["stage_secret_pool_sizes"] = []
+    combined["stage_eval_pool_sizes"] = []
     combined["post_warmstart_success"] = []
+    combined["post_warmstart_success_heldout"] = []
+    combined["post_warmstart_success_indist"] = []
     combined["stage_post_warmstart_iter"] = []
 
     iter_offset = 0
+    prev_ws_pool: Optional[List[str]] = None
     for stage_idx, target_n in enumerate(vocab_schedule):
         prev_n = len(policy.words)
-        new_n = policy.expand_vocab(int(target_n))
+        if expand_action_space:
+            new_n = policy.expand_vocab(int(target_n))
+        else:
+            new_n = len(policy.words)
         added = new_n - prev_n
-        env.set_target_pool(policy.words)
+
+        # Slice the stage's secret pool from the policy's word list. With a
+        # constant action space (expand_action_space=False), policy.words is
+        # already the full action set, and target_n picks the prefix used as
+        # this stage's secret pool. With expand_action_space=True (legacy),
+        # policy.words has just been grown to target_n above.
+        stage_pool_size = min(int(target_n), len(policy.words))
+        stage_pool = list(policy.words[:stage_pool_size])
+
+        if secret_holdout_frac > 0 and env_eval is not None:
+            n_eval_pool = max(2, int(round(stage_pool_size * secret_holdout_frac)))
+            n_eval_pool = min(n_eval_pool, max(stage_pool_size - 1, 1))
+            ws_pool = stage_pool[:-n_eval_pool] if n_eval_pool > 0 else stage_pool
+            eval_pool = stage_pool[-n_eval_pool:] if n_eval_pool > 0 else []
+            env.set_target_pool(ws_pool)
+            if eval_pool:
+                env_eval.set_target_pool(eval_pool)
+        else:
+            ws_pool = stage_pool
+            eval_pool = []
+            env.set_target_pool(ws_pool)
+            if env_eval is not None:
+                env_eval.set_target_pool(ws_pool)
 
         ws_steps_stage = per_stage_warm_steps[stage_idx]
+        ws_pool_changed = prev_ws_pool != ws_pool
         if verbose:
+            if eval_pool:
+                pool_desc = (
+                    f"secret_pool: {stage_pool_size} (ws={len(ws_pool)}, "
+                    f"eval={len(eval_pool)})"
+                )
+            else:
+                pool_desc = f"secret_pool: {stage_pool_size}"
+            if expand_action_space:
+                action_desc = f"action_dim: {prev_n} -> {new_n} (+{added})"
+            else:
+                action_desc = f"action_dim: {new_n} (fixed)"
             print(
                 f"\n=== Curriculum stage {stage_idx + 1}/{len(vocab_schedule)} "
-                f"| vocab: {prev_n} -> {new_n} (+{added}) "
+                f"| {action_desc} | {pool_desc} "
                 f"| iters: {per_stage_iters[stage_idx]} "
                 f"| warm-start eps: {ws_steps_stage} ===",
                 flush=True,
             )
 
         ran_warm_start = False
-        if warm_start_fn is not None and ws_steps_stage > 0 and (added > 0 or stage_idx == 0):
+        # Run warm-start whenever the training pool changed (new stage size or
+        # different split), or always on stage 0 to seed the head from random init.
+        if (
+            warm_start_fn is not None
+            and ws_steps_stage > 0
+            and (ws_pool_changed or stage_idx == 0)
+        ):
             ws_kwargs_stage = dict(warm_start_kwargs)
             # Vary the warm-start seed per stage so the random pre-play sequence
             # (and the global RNG state warm-start ends in) is decorrelated
@@ -807,16 +910,19 @@ def train_curriculum(
                 skipped = ws.get("skipped", "?")
                 opt_steps = ws.get("opt_steps", "?")
                 print(
-                    f"Warm-start (stage {stage_idx + 1}, vocab={new_n}): "
+                    f"Warm-start (stage {stage_idx + 1}, ws_pool={len(ws_pool)}): "
                     f"fitted {fitted} loss values across {opt_steps} opt steps; "
                     f"skipped {skipped}"
                 )
 
-        # Post-warm-start eval: the single sharpest "is ES doing anything beyond
-        # warm-start?" diagnostic. Compare against eval_success at the end of
-        # this stage in the returned history.
+        # Post-warm-start eval: in-distribution (training pool, env) and held-out
+        # (env_eval, when configured). The gap between them is the memorization
+        # signal; the gap between held-out post-WS and held-out end-of-stage ES
+        # is the "is ES doing anything?" signal.
+        post_ws_indist = float("nan")
+        post_ws_heldout = float("nan")
         if quick_eval_success is not None and post_warm_start_eval_episodes > 0:
-            post_ws_success = float(
+            post_ws_indist = float(
                 quick_eval_success(
                     policy,
                     env,
@@ -825,25 +931,50 @@ def train_curriculum(
                     max_turns=es_kwargs.get("max_turns", 6),
                 )
             )
-        else:
-            post_ws_success = float("nan")
-        combined["post_warmstart_success"].append(post_ws_success)
+            if env_eval is not None and eval_pool:
+                post_ws_heldout = float(
+                    quick_eval_success(
+                        policy,
+                        env_eval,
+                        n_episodes=post_warm_start_eval_episodes,
+                        stochastic=not post_warm_start_eval_deterministic,
+                        max_turns=es_kwargs.get("max_turns", 6),
+                    )
+                )
+        # Headline post_warmstart_success: held-out when available, else in-dist
+        # (preserves the legacy semantics for callers that only inspect this key).
+        post_ws_headline = (
+            post_ws_heldout if (env_eval is not None and eval_pool and post_ws_heldout == post_ws_heldout)
+            else post_ws_indist
+        )
+        combined["post_warmstart_success"].append(post_ws_headline)
+        combined["post_warmstart_success_heldout"].append(post_ws_heldout)
+        combined["post_warmstart_success_indist"].append(post_ws_indist)
         combined["stage_post_warmstart_iter"].append(iter_offset)
         if verbose:
             tag = "post-warm-start" if ran_warm_start else "post-expand (no warm-start)"
             mode = "greedy" if post_warm_start_eval_deterministic else "stoch"
-            print(
-                f"  {tag} eval_success ({mode}, "
-                f"{post_warm_start_eval_episodes} eps): {post_ws_success:.1%}"
-            )
+            if env_eval is not None and eval_pool:
+                print(
+                    f"  {tag} eval_success ({mode}, {post_warm_start_eval_episodes} eps): "
+                    f"in-dist {post_ws_indist:.1%} | held-out {post_ws_heldout:.1%}"
+                )
+            else:
+                print(
+                    f"  {tag} eval_success ({mode}, "
+                    f"{post_warm_start_eval_episodes} eps): {post_ws_indist:.1%}"
+                )
 
         stage_history = train_es_wordle(
             policy=policy,
             env=env,
             n_iterations=per_stage_iters[stage_idx],
             verbose=verbose,
+            env_eval=env_eval,
             **es_kwargs,
         )
+
+        prev_ws_pool = ws_pool
 
         for k in _PER_ITER_KEYS:
             if k == "train_iter":
@@ -858,6 +989,8 @@ def train_curriculum(
 
         combined["stage_starts"].append(iter_offset)
         combined["stage_vocab_sizes"].append(new_n)
+        combined["stage_secret_pool_sizes"].append(len(ws_pool))
+        combined["stage_eval_pool_sizes"].append(len(eval_pool))
         iter_offset += per_stage_iters[stage_idx]
 
     return combined

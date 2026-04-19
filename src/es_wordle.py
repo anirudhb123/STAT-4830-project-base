@@ -218,7 +218,7 @@ def es_gradient_estimate_wordle(
     win_fitness_scale: float = 5.0,
     antithetic: bool = False,
     common_random_numbers: bool = False,
-) -> Tuple[torch.Tensor, float, List[float], float, float]:
+) -> Tuple[torch.Tensor, float, List[float], float, float, List[float]]:
     """
     Estimate gradient using Evolution Strategies for Wordle.
     
@@ -254,6 +254,10 @@ def es_gradient_estimate_wordle(
         fitness_values: List of fitness values used for ES
         avg_es_win: Mean win rate (0–1) across the N perturbation rollouts
         pop_fitness_std: Std dev of per-member fitness (shows ES population spread)
+        es_win_rates: Per-member win rates (list of length N), in population order. Used by
+            ``train_es_wordle`` to compute the ``win_count`` diagnostic (number of population
+            members that won at least one episode this iter); when 0 or 1, the rank vector
+            is effectively noise.
     """
     # Get flattened trainable parameters (frozen layers excluded)
     params = torch.cat([p.flatten() for p in _trainable_params(policy)])
@@ -393,7 +397,7 @@ def es_gradient_estimate_wordle(
     
     avg_es_win = float(np.mean(es_win_rates))
     pop_fitness_std = float(np.std(fitness_values)) if len(fitness_values) > 1 else 0.0
-    return gradient, fitness_tensor.mean().item(), fitness_values, avg_es_win, pop_fitness_std
+    return gradient, fitness_tensor.mean().item(), fitness_values, avg_es_win, pop_fitness_std, es_win_rates
 
 
 def train_es_wordle(
@@ -417,6 +421,8 @@ def train_es_wordle(
     common_random_numbers: bool = False,
     ema_beta: float = 0.0,
     env_eval: Optional[Any] = None,
+    probe_n_episodes: int = 32,
+    probe_seed: int = 1234567,
 ) -> Dict[str, List]:
     """
     Train policy using Evolution Strategies on Wordle.
@@ -449,6 +455,15 @@ def train_es_wordle(
         env_eval: Optional separate env for periodic eval. When provided, periodic eval rollouts
             sample secrets from ``env_eval`` (e.g. a held-out pool) while ES rollouts continue to
             use ``env`` (the training pool). When None, periodic eval uses ``env`` (legacy behavior).
+        probe_n_episodes: Number of fixed-seed eval episodes used by the per-step probe (the
+            ``train_probe_delta`` diagnostic). The probe runs greedy rollouts on ``env_eval`` (or
+            ``env`` if no ``env_eval``) before *and* after applying each ES step on a deterministic
+            slate of secrets, so the delta isolates the policy update's effect from secret-sampling
+            noise. Only triggered on eval iters (``iteration % eval_every == 0``) so it adds at
+            most ``2 * probe_n_episodes`` rollouts per ``eval_every`` ES iters.
+        probe_seed: Fixed RNG seed installed before each probe rollout so pre- and post-update
+            probes face identical secrets across iterations. The outer RNG state is snapshotted
+            and restored around the probe so it does not perturb ES rollouts.
 
     Returns:
         history: Dictionary with training history
@@ -477,14 +492,67 @@ def train_es_wordle(
     # Cosine similarity of successive *raw* ES gradients — the real "is there signal?" plot.
     # NaN for iteration 0 (no previous gradient to compare against).
     history["train_grad_cos"] = []
+    # ES signal diagnostics. `train_ess_rank` is the number of unique fitness values across the
+    # population — when << N, ties dominate the rank ordering and the ES gradient is
+    # variance-dominated noise. `train_win_count` is the number of population members that
+    # won at least one episode; 0 or 1 means the rank vector is essentially noise.
+    # `train_probe_delta` is the change in greedy success on a fixed probe slate caused by this
+    # iter's ES step (NaN on non-eval iters); it is the most direct "did this step help?" signal.
+    history["train_ess_rank"] = []
+    history["train_win_count"] = []
+    history["train_probe_delta"] = []
 
     use_ema = ema_beta > 0.0
     g_ema: Optional[torch.Tensor] = None
     prev_raw_gradient: Optional[torch.Tensor] = None
+    policy_device = next(policy.parameters()).device
+
+    def _run_probe() -> float:
+        """Greedy rollout on a fixed slate of secrets. Snapshots+restores RNG so the probe
+        is reproducible across iterations and does not perturb the surrounding ES stream.
+        """
+        if probe_n_episodes <= 0:
+            return float("nan")
+        rng_snap = _snapshot_rng_state(policy_device)
+        try:
+            random.seed(probe_seed)
+            np.random.seed(probe_seed)
+            torch.manual_seed(probe_seed)
+            if torch.cuda.is_available() and policy_device.type == "cuda":
+                torch.cuda.manual_seed_all(probe_seed)
+            if hasattr(policy, "forward_logits_batch") and probe_n_episodes > 1:
+                _r, successes, _t = _rollout_batched(
+                    policy, eval_env, probe_n_episodes, max_turns, deterministic=True
+                )
+            else:
+                successes = []
+                policy.eval()
+                with torch.no_grad():
+                    for _ in range(probe_n_episodes):
+                        s = eval_env.reset()
+                        d = False
+                        info: dict = {}
+                        t = 0
+                        while not d and t < max_turns:
+                            emb = eval_env.get_state_embedding(s)
+                            xml, _lp = policy.format_action_xml(s, emb, deterministic=True)
+                            s, _r, d, info = eval_env.step(xml)
+                            t += 1
+                        successes.append(float(info.get("correct_answer", 0.0)))
+            return float(np.mean(successes)) if successes else float("nan")
+        finally:
+            _restore_rng_state(rng_snap, policy_device)
 
     for iteration in range(n_iterations):
         # ES gradient step
-        gradient, avg_fitness, fitness_values, avg_es_win, pop_fitness_std = es_gradient_estimate_wordle(
+        (
+            gradient,
+            avg_fitness,
+            fitness_values,
+            avg_es_win,
+            pop_fitness_std,
+            es_win_rates,
+        ) = es_gradient_estimate_wordle(
             policy,
             env,
             N=N,
@@ -511,6 +579,16 @@ def train_es_wordle(
             grad_cos = float("nan")
         prev_raw_gradient = gradient.detach().clone()
 
+        # ESS for the rank ordering: number of unique fitness values across the population.
+        # Rounded to 6 decimals to merge values that differ only in float noise. With
+        # rank_fitness=True and small n_eval_episodes, ties dominate when most members lose
+        # every episode (all wr=0) and `ess_rank` collapses toward 1, which directly explains
+        # `cos(ĝ) ≈ 0` -- the ES gradient is then essentially a sum of noise vectors with
+        # near-uniform "fitness" weights.
+        ess_rank = len({round(float(f), 6) for f in fitness_values})
+        # Number of population members that won at least one episode this iter.
+        win_count = sum(1 for wr in es_win_rates if wr > 0.0)
+
         # Apply EMA momentum (with Adam-style bias correction) so persistent signal
         # accumulates across iterations while noise averages out.
         if use_ema:
@@ -527,10 +605,32 @@ def train_es_wordle(
         update = alpha * applied_gradient
         if normalize_gradient and grad_norm > 1e-8:
             update = alpha * applied_gradient / applied_gradient.norm()
+
+        # Pre/post probe on a fixed-seed eval slate, only on eval iters (cost is
+        # 2 * probe_n_episodes greedy rollouts per `eval_every` ES iters). Pre-probe
+        # uses the *current* params; post-probe uses params after the update. Same
+        # `probe_seed` => identical secret slate => the delta isolates the policy
+        # update from secret-sampling noise.
+        is_eval_iter = (iteration % eval_every == 0) or (iteration == n_iterations - 1)
+        if is_eval_iter and probe_n_episodes > 0:
+            pre_probe = _run_probe()
+        else:
+            pre_probe = float("nan")
+
         params = params + update
         _set_flat_params(policy, params)
         step_norm = update.norm().item()
         param_drift = (params - params_init).norm().item()
+
+        if is_eval_iter and probe_n_episodes > 0:
+            post_probe = _run_probe()
+            probe_delta = (
+                post_probe - pre_probe
+                if (post_probe == post_probe and pre_probe == pre_probe)
+                else float("nan")
+            )
+        else:
+            probe_delta = float("nan")
 
         history["train_iter"].append(iteration)
         history["train_fitness"].append(avg_fitness)
@@ -539,6 +639,9 @@ def train_es_wordle(
         history["param_drift"].append(param_drift)
         history["pop_fitness_std"].append(pop_fitness_std)
         history["train_grad_cos"].append(grad_cos)
+        history["train_ess_rank"].append(ess_rank)
+        history["train_win_count"].append(win_count)
+        history["train_probe_delta"].append(probe_delta)
 
         # Periodic evaluation (full rollout stats; slow when eval_n_episodes is large).
         # When the policy exposes ``forward_logits_batch`` we use the same
@@ -604,6 +707,7 @@ def train_es_wordle(
             history['gradient_norm'].append(grad_norm)
             
             _cos_str = "  n/a" if grad_cos != grad_cos else f"{grad_cos:+.2f}"
+            _dprobe_str = "  n/a" if probe_delta != probe_delta else f"{probe_delta:+.1%}"
             if verbose:
                 _ev = "greedy" if eval_deterministic else "stoch"
                 _fl = {"return": "ret", "win": "win", "win_plus_return": "win+ret"}.get(
@@ -620,7 +724,10 @@ def train_es_wordle(
                     f"Grad‖: {grad_norm:.2f} | "
                     f"Step‖: {step_norm:.4f} | "
                     f"cos(ĝ): {_cos_str} | "
-                    f"‖θ-θ₀‖: {param_drift:.2f}"
+                    f"‖θ-θ₀‖: {param_drift:.2f} | "
+                    f"ess: {ess_rank}/{N} | "
+                    f"wins: {win_count}/{N} | "
+                    f"dprobe: {_dprobe_str}"
                 )
         elif verbose:
             _cos_str = "  n/a" if grad_cos != grad_cos else f"{grad_cos:+.2f}"
@@ -633,7 +740,8 @@ def train_es_wordle(
                 f"popσ: {pop_fitness_std:.4f} | "
                 f"Grad‖: {grad_norm:.2f} | Step‖: {step_norm:.4f} | "
                 f"cos(ĝ): {_cos_str} | "
-                f"‖θ-θ₀‖: {param_drift:.2f} | (no eval)"
+                f"‖θ-θ₀‖: {param_drift:.2f} | "
+                f"ess: {ess_rank}/{N} | wins: {win_count}/{N} | (no eval)"
             )
     
     return history
@@ -648,6 +756,9 @@ _PER_ITER_KEYS = (
     "param_drift",
     "pop_fitness_std",
     "train_grad_cos",
+    "train_ess_rank",
+    "train_win_count",
+    "train_probe_delta",
 )
 # Keys produced once per eval checkpoint.
 _PER_EVAL_KEYS = (
@@ -676,6 +787,8 @@ def train_curriculum(
     env_eval: Optional[Any] = None,
     secret_holdout_frac: float = 0.0,
     expand_action_space: bool = True,
+    holdout_mode: str = "episode",
+    masked_eval_sanity_probe: bool = False,
     **es_kwargs: Any,
 ) -> Dict[str, List]:
     """Curriculum ES: grow the policy/env vocabulary across stages.
@@ -687,14 +800,25 @@ def train_curriculum(
        If False, the policy's action space is left untouched (caller is
        responsible for sizing it before this call); only the env's secret
        pool is re-targeted per stage.
-    2. ``env.set_target_pool(...)``: when ``secret_holdout_frac > 0``, the
-       slice ``policy.words[:N_i]`` is partitioned into
-       ``ws_pool = words[:-n_eval]`` and ``eval_pool = words[-n_eval:]``,
-       with ``n_eval = max(2, round(N_i * secret_holdout_frac))``;
-       ``env`` is set to ``ws_pool`` and ``env_eval`` (if provided) is set
-       to ``eval_pool``. When ``secret_holdout_frac == 0`` the legacy
-       behavior holds: ``env`` is set to all ``policy.words[:N_i]``
-       (i.e. ``policy.words`` when ``expand_action_space=True``).
+    2. ``env.set_target_pool(...)``: behavior depends on ``holdout_mode``.
+       - ``"word"`` (legacy, opt-in): when ``secret_holdout_frac > 0`` the
+         slice ``policy.words[:N_i]`` is partitioned into
+         ``ws_pool = words[:-n_eval]`` and ``eval_pool = words[-n_eval:]``,
+         with ``n_eval = max(2, round(N_i * secret_holdout_frac))``;
+         ``env`` is set to ``ws_pool`` and ``env_eval`` (if provided) is set
+         to ``eval_pool``. NB: under greedy ``argmax`` eval over the full
+         action space, the eval-pool indices are never CE targets nor ES
+         winners, so this metric is mathematically forced toward 0 even
+         when the policy has learned Wordle. Use only for explicit
+         out-of-vocab generalization experiments.
+       - ``"episode"`` (default): ``ws_pool = eval_pool = stage_pool``;
+         both ``env`` and ``env_eval`` (when provided) are set to the same
+         pool. The held-out signal then comes from eval rollouts naturally
+         drawing different secrets / first-guess prefixes from training
+         rollouts (different RNG positions), so eval measures generalization
+         to fresh game *episodes* rather than out-of-vocab words. The head
+         can in principle argmax to any eval secret, so the metric is
+         answerable by the architecture.
     3. If ``warm_start_fn`` is provided and the stage's training pool changed,
        run ``warm_start_fn(policy, env, n_steps=warm_start_steps, **warm_start_kwargs)``
        to seed the head on the training secret distribution.
@@ -728,9 +852,32 @@ def train_curriculum(
     the held-out pool without touching the training env.
 
     ``secret_holdout_frac`` controls the per-stage train/held-out split on the
-    secret pool. 0.0 (default) reproduces the legacy behavior. Values in
-    ``(0, 0.5)`` partition the stage-k pool ``policy.words[:N_k]`` into a
-    deterministic prefix (training secrets) and suffix (held-out secrets).
+    secret pool when ``holdout_mode="word"``. 0.0 reproduces the legacy
+    no-holdout behavior. Values in ``(0, 0.5)`` partition the stage-k pool
+    ``policy.words[:N_k]`` into a deterministic prefix (training secrets) and
+    suffix (held-out secrets). Ignored when ``holdout_mode="episode"`` (in
+    which case the train and eval pools are identical and held-out semantics
+    come from RNG positions rather than from a vocab split).
+
+    ``holdout_mode`` selects how the per-stage train / held-out split is
+    constructed (see step 2 above). Defaults to ``"episode"``; pass
+    ``"word"`` to restore the prior split-by-suffix behavior.
+
+    ``masked_eval_sanity_probe`` (default False): when True, after the
+    post-warm-start eval each stage also runs a one-shot greedy eval on
+    ``env_eval`` with logits *masked* to the indices in ``eval_pool`` (i.e.
+    argmax restricted to the held-out / in-vocab indices). Requires
+    ``quick_eval_success_masked`` from ``wordle_gpt2_warmstart``. Useful as a
+    diagnostic in two ways:
+       - In ``holdout_mode="word"``: confirms whether the unmasked 0% is a
+         metric construction artifact (masked >> 0 means the policy can win
+         on held-out secrets when argmax is restricted, so the prior
+         unmasked 0% was forced by the disjoint-word eval, not a learning
+         failure).
+       - In ``holdout_mode="episode"``: shows what greedy success would be
+         if the head were prevented from emitting words outside the stage
+         vocabulary; gap vs. unmasked eval quantifies how much argmax mass
+         leaks outside the in-vocab pool.
 
     ``expand_action_space`` (default True) controls whether each stage calls
     ``policy.expand_vocab(N_i)``. Set False when the policy is pre-built with
@@ -756,6 +903,12 @@ def train_curriculum(
           ``env`` (the training pool).
         - ``stage_post_warmstart_iter``: global iter index where each stage's
           post-warm-start eval was taken (= ``stage_starts[stage]``).
+        - ``stage_holdout_mode``: the ``holdout_mode`` used for each stage
+          (constant across stages but recorded per-stage so post-hoc plots
+          can label the metric).
+        - ``stage_masked_post_warmstart_success``: per-stage greedy eval on
+          ``env_eval`` with logits masked to the in-vocab eval-pool indices,
+          when ``masked_eval_sanity_probe=True``; NaN otherwise.
 
     LoRA adapters and the LM body persist across stages — only the linear head
     grows when ``expand_action_space=True``, with old rows preserved by
@@ -765,10 +918,14 @@ def train_curriculum(
         raise ValueError(
             f"secret_holdout_frac must be in [0, 0.5), got {secret_holdout_frac}."
         )
-    if secret_holdout_frac > 0 and env_eval is None:
+    if holdout_mode not in ("episode", "word"):
         raise ValueError(
-            "secret_holdout_frac > 0 requires env_eval to be provided so the "
-            "held-out secret pool can be installed without polluting training."
+            f"holdout_mode must be 'episode' or 'word', got {holdout_mode!r}."
+        )
+    if holdout_mode == "word" and secret_holdout_frac > 0 and env_eval is None:
+        raise ValueError(
+            "holdout_mode='word' with secret_holdout_frac > 0 requires env_eval "
+            "so the held-out secret pool can be installed without polluting training."
         )
     if not vocab_schedule:
         raise ValueError("vocab_schedule must contain at least one stage size.")
@@ -809,7 +966,7 @@ def train_curriculum(
 
     base_warm_seed = int(warm_start_kwargs.get("seed", 0))
 
-    # Optional import: only used for the post-warm-start diagnostic.
+    # Optional imports: only used for the post-warm-start diagnostic.
     try:
         from .wordle_gpt2_warmstart import quick_eval_success  # type: ignore
     except ImportError:
@@ -817,6 +974,16 @@ def train_curriculum(
             from wordle_gpt2_warmstart import quick_eval_success  # type: ignore
         except ImportError:
             quick_eval_success = None  # type: ignore
+
+    quick_eval_success_masked = None  # type: ignore
+    if masked_eval_sanity_probe:
+        try:
+            from .wordle_gpt2_warmstart import quick_eval_success_masked  # type: ignore
+        except ImportError:
+            try:
+                from wordle_gpt2_warmstart import quick_eval_success_masked  # type: ignore
+            except ImportError:
+                quick_eval_success_masked = None  # type: ignore
 
     combined: Dict[str, List] = {k: [] for k in _PER_ITER_KEYS}
     combined.update({k: [] for k in _PER_EVAL_KEYS})
@@ -828,6 +995,8 @@ def train_curriculum(
     combined["post_warmstart_success_heldout"] = []
     combined["post_warmstart_success_indist"] = []
     combined["stage_post_warmstart_iter"] = []
+    combined["stage_holdout_mode"] = []
+    combined["stage_masked_post_warmstart_success"] = []
 
     iter_offset = 0
     prev_ws_pool: Optional[List[str]] = None
@@ -847,7 +1016,11 @@ def train_curriculum(
         stage_pool_size = min(int(target_n), len(policy.words))
         stage_pool = list(policy.words[:stage_pool_size])
 
-        if secret_holdout_frac > 0 and env_eval is not None:
+        if holdout_mode == "word" and secret_holdout_frac > 0 and env_eval is not None:
+            # Word-level holdout (legacy / opt-in): partition the stage pool into a
+            # disjoint training prefix and held-out suffix. NB: under greedy argmax over
+            # the full action space this measures out-of-vocab classification, not
+            # Wordle generalization -- the head is never trained to emit eval-pool words.
             n_eval_pool = max(2, int(round(stage_pool_size * secret_holdout_frac)))
             n_eval_pool = min(n_eval_pool, max(stage_pool_size - 1, 1))
             ws_pool = stage_pool[:-n_eval_pool] if n_eval_pool > 0 else stage_pool
@@ -855,7 +1028,19 @@ def train_curriculum(
             env.set_target_pool(ws_pool)
             if eval_pool:
                 env_eval.set_target_pool(eval_pool)
+        elif holdout_mode == "episode":
+            # Episode-level holdout: same vocab in train and eval. Train and eval rollouts
+            # naturally consume different positions of the global RNG (different
+            # `.reset()` calls), so eval secrets / first-guess prefixes differ from
+            # training. The architecture *can* in principle argmax to any eval secret.
+            ws_pool = stage_pool
+            eval_pool = stage_pool  # for the masked-eval probe and eval_pool_size logging
+            env.set_target_pool(ws_pool)
+            if env_eval is not None:
+                env_eval.set_target_pool(ws_pool)
         else:
+            # holdout_mode == "word" but no holdout configured (frac == 0 or env_eval None):
+            # fall back to the legacy "no holdout" behavior — train and eval share the pool.
             ws_pool = stage_pool
             eval_pool = []
             env.set_target_pool(ws_pool)
@@ -865,10 +1050,15 @@ def train_curriculum(
         ws_steps_stage = per_stage_warm_steps[stage_idx]
         ws_pool_changed = prev_ws_pool != ws_pool
         if verbose:
-            if eval_pool:
+            if holdout_mode == "episode":
                 pool_desc = (
-                    f"secret_pool: {stage_pool_size} (ws={len(ws_pool)}, "
-                    f"eval={len(eval_pool)})"
+                    f"secret_pool: {stage_pool_size} "
+                    f"(episode-holdout; ws == eval == {len(ws_pool)})"
+                )
+            elif eval_pool:
+                pool_desc = (
+                    f"secret_pool: {stage_pool_size} "
+                    f"(word-holdout; ws={len(ws_pool)}, eval={len(eval_pool)})"
                 )
             else:
                 pool_desc = f"secret_pool: {stage_pool_size}"
@@ -955,15 +1145,55 @@ def train_curriculum(
             tag = "post-warm-start" if ran_warm_start else "post-expand (no warm-start)"
             mode = "greedy" if post_warm_start_eval_deterministic else "stoch"
             if env_eval is not None and eval_pool:
+                hd_label = "fresh-eps" if holdout_mode == "episode" else "held-out"
                 print(
                     f"  {tag} eval_success ({mode}, {post_warm_start_eval_episodes} eps): "
-                    f"in-dist {post_ws_indist:.1%} | held-out {post_ws_heldout:.1%}"
+                    f"in-dist {post_ws_indist:.1%} | {hd_label} {post_ws_heldout:.1%}"
                 )
             else:
                 print(
                     f"  {tag} eval_success ({mode}, "
                     f"{post_warm_start_eval_episodes} eps): {post_ws_indist:.1%}"
                 )
+
+        # Optional masked-eval sanity probe: greedy eval on env_eval but with the head's
+        # logits restricted to the in-vocab eval-pool indices. Diagnoses the prior 0% by
+        # quantifying how much argmax mass is leaking outside the trained vocabulary.
+        # See `holdout_mode` doc for the two semantic interpretations (word vs episode).
+        post_ws_masked = float("nan")
+        if (
+            masked_eval_sanity_probe
+            and quick_eval_success_masked is not None
+            and env_eval is not None
+            and eval_pool
+            and post_warm_start_eval_episodes > 0
+        ):
+            allowed = {
+                policy.word_to_idx[w]
+                for w in eval_pool
+                if w in getattr(policy, "word_to_idx", {})
+            }
+            if allowed:
+                post_ws_masked = float(
+                    quick_eval_success_masked(
+                        policy,
+                        env_eval,
+                        allowed_indices=allowed,
+                        n_episodes=post_warm_start_eval_episodes,
+                        stochastic=not post_warm_start_eval_deterministic,
+                        max_turns=es_kwargs.get("max_turns", 6),
+                    )
+                )
+                if verbose:
+                    print(
+                        f"  [sanity] masked-greedy eval (argmax restricted to {len(allowed)} "
+                        f"in-vocab indices, {post_warm_start_eval_episodes} eps): "
+                        f"{post_ws_masked:.1%}  "
+                        f"(unmasked held-out was {post_ws_heldout:.1%}; gap quantifies "
+                        f"argmax leakage outside the eval-pool)"
+                    )
+        combined["stage_holdout_mode"].append(holdout_mode)
+        combined["stage_masked_post_warmstart_success"].append(post_ws_masked)
 
         stage_history = train_es_wordle(
             policy=policy,

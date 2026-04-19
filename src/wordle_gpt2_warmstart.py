@@ -6,7 +6,7 @@ after random play (target is NOT in the prompt; only used as label).
 from __future__ import annotations
 
 import random
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import numpy as np
 import torch
@@ -177,6 +177,20 @@ def supervised_warm_start_wordle(
     return {"loss": losses, "skipped": skipped, "opt_steps": opt_steps}
 
 
+def _wrap_guess_xml(state: Any, word: str) -> str:
+    """Replicate ``WordleGPT2Policy.format_action_xml``'s wrapper without re-running the LM.
+
+    Mirrors the inline helper in ``es_wordle._format_action_xml_for_word`` so this module
+    has no circular import on ``es_wordle``.
+    """
+    turn = state.turn_number + 1
+    if turn == 1:
+        think = f"Using the language model prior, opening with {word}."
+    else:
+        think = f"Conditioning on feedback, next guess: {word}."
+    return f"<think>{think}</think>\n<guess>{word}</guess>"
+
+
 def quick_eval_success(
     policy: WordleGPT2Policy,
     env: Any,
@@ -184,10 +198,26 @@ def quick_eval_success(
     stochastic: bool = True,
     max_turns: int = 6,
     device: Optional[torch.device] = None,
-) -> float:
-    """Fraction of mock episodes solved within max_turns (diagnostic)."""
+    return_argmax_in_set: Optional[Iterable[int]] = None,
+) -> Union[float, Tuple[float, float]]:
+    """Fraction of mock episodes solved within ``max_turns`` (diagnostic).
+
+    When ``return_argmax_in_set`` is provided, also tracks the fraction of *greedy*
+    actions whose argmax index lies in that set, and returns ``(win_rate, in_set_frac)``.
+    Useful for confirming that the head's argmax is concentrated on the in-vocab pool
+    (or, for the original buggy metric, is *never* in the held-out suffix). Tracking is
+    only meaningful in greedy mode (``stochastic=False``); under sampling the fraction
+    is computed against the sampled action and is not strictly an "argmax" measurement.
+
+    Default return type is ``float`` (legacy callers); the tuple form is opt-in.
+    """
     if device is None:
         device = next(policy.parameters()).device
+    track_set: Optional[Set[int]] = None
+    if return_argmax_in_set is not None:
+        track_set = set(int(i) for i in return_argmax_in_set)
+    in_set_count = 0
+    action_count = 0
     policy.eval()
     wins = 0
     with torch.no_grad():
@@ -198,7 +228,100 @@ def quick_eval_success(
             info: Dict[str, Any] = {"correct_answer": 0.0}
             while not done and turns < max_turns:
                 emb = env.get_state_embedding(state)
-                xml, _ = policy.format_action_xml(state, emb, deterministic=not stochastic)
+                if track_set is None:
+                    xml, _ = policy.format_action_xml(state, emb, deterministic=not stochastic)
+                else:
+                    # Manual path: get the chosen index so we can record whether it's in
+                    # the tracked set, then format the XML with the same template
+                    # `format_action_xml` would have used.
+                    idx, _lp = policy.get_action(
+                        emb,
+                        deterministic=not stochastic,
+                        previous_guesses=state.previous_guesses,
+                        state=state,
+                    )
+                    if idx in track_set:
+                        in_set_count += 1
+                    action_count += 1
+                    xml = _wrap_guess_xml(state, policy.idx_to_word[idx])
+                state, _, done, info = env.step(xml)
+                turns += 1
+            if float(info.get("correct_answer", 0.0)) >= 0.5:
+                wins += 1
+    win_rate = wins / max(1, n_episodes)
+    if track_set is None:
+        return win_rate
+    in_set_frac = (in_set_count / action_count) if action_count > 0 else float("nan")
+    return win_rate, in_set_frac
+
+
+def quick_eval_success_masked(
+    policy: WordleGPT2Policy,
+    env: Any,
+    allowed_indices: Iterable[int],
+    n_episodes: int = 32,
+    stochastic: bool = False,
+    max_turns: int = 6,
+    device: Optional[torch.device] = None,
+) -> float:
+    """Fraction of mock episodes solved within ``max_turns`` when the head's argmax /
+    sampling is restricted to ``allowed_indices`` (a subset of action indices).
+
+    Implementation: for each step, compute full logits, mask non-allowed indices to
+    ``-inf`` (in addition to previous-guess masking already done by
+    ``policy.get_action``-style consumers), then take ``argmax`` (greedy) or sample.
+
+    This is the diagnostic that proves the prior 0% on word-level holdout was a metric
+    construction artifact: when the eval-pool indices were *never* CE targets nor ES
+    winners, an unrestricted greedy argmax cannot land on them; restricting the argmax
+    to those indices recovers a non-trivial success rate from the same checkpoint.
+
+    In ``holdout_mode="episode"``, ``allowed_indices`` is typically the in-vocab stage
+    pool, and the gap vs. the unmasked greedy eval quantifies how much argmax mass is
+    leaking onto out-of-pool words.
+    """
+    if device is None:
+        device = next(policy.parameters()).device
+    allowed = set(int(i) for i in allowed_indices)
+    if not allowed:
+        return float("nan")
+    action_dim = int(getattr(policy, "action_dim", 0)) or len(getattr(policy, "words", []))
+    if action_dim <= 0:
+        raise RuntimeError("Cannot determine policy.action_dim for masked eval.")
+    word_to_idx = getattr(policy, "word_to_idx", {}) or {}
+    idx_to_word = getattr(policy, "idx_to_word", None)
+    if idx_to_word is None:
+        raise RuntimeError("Policy does not expose idx_to_word; cannot run masked eval.")
+
+    # Static disallowed mask: indices NOT in `allowed` are forbidden every step.
+    disallow = torch.zeros(action_dim, dtype=torch.bool, device=device)
+    disallow[:] = True
+    for i in allowed:
+        if 0 <= i < action_dim:
+            disallow[i] = False
+
+    policy.eval()
+    wins = 0
+    with torch.no_grad():
+        for _ in range(n_episodes):
+            state = env.reset()
+            done = False
+            turns = 0
+            info: Dict[str, Any] = {"correct_answer": 0.0}
+            while not done and turns < max_turns:
+                logits = policy.forward_logits(state).clone()
+                # Mask previously-guessed words (matches `WordleGPT2Policy.get_action` semantics).
+                for g in state.previous_guesses:
+                    u = g.upper()
+                    if u in word_to_idx:
+                        logits[word_to_idx[u]] = float("-inf")
+                logits[disallow] = float("-inf")
+                if stochastic:
+                    probs = torch.softmax(logits, dim=-1)
+                    idx = int(torch.distributions.Categorical(probs=probs).sample().item())
+                else:
+                    idx = int(torch.argmax(logits).item())
+                xml = _wrap_guess_xml(state, idx_to_word[idx])
                 state, _, done, info = env.step(xml)
                 turns += 1
             if float(info.get("correct_answer", 0.0)) >= 0.5:

@@ -1053,12 +1053,23 @@ def train_curriculum(
 
     ``warm_start_max_post_ws_success`` (default None): when set to a float in
     ``(0, 1]``, monitors post-warm-start in-distribution success per stage and
-    suppresses warm-start in *all subsequent* stages once any stage exceeds the
-    ceiling. The motivation: if the supervised warm-start already saturates the
-    head (post-WS = 100%), ES has no headroom to improve and the cos(ĝ) signal
-    is structurally zero. Capping at ~0.85 leaves ES ~15 percentage points of
+    suppresses warm-start in subsequent stages **whose training secret pool
+    did not change** once any stage exceeds the ceiling. The motivation: if
+    supervised warm-start already saturates the head on a given pool, more CE
+    on the same pool would just refit the same labels and eat headroom ES
+    could otherwise use. Capping at ~0.85 leaves ES ~15 percentage points of
     headroom per stage so the "is ES doing anything?" signal is observable.
-    Defaults to None (no ceiling, legacy behavior).
+
+    IMPORTANT: the suppression is now **gated on the secret pool being
+    unchanged**. When the pool grows at a stage boundary (the common case in
+    a non-decreasing curriculum), new CE targets appear — action-head rows
+    corresponding to newly-added words have never been fit — and warm-start
+    is always permitted for that stage regardless of the prior stage's
+    post-WS score. Without this gate, a mid-curriculum saturation (e.g. 88%
+    at pool=96) would permanently starve every later, larger pool of CE,
+    leaving the head rows for the newly-in-pool words at their init value
+    and causing a mechanical drop at each vocab expansion. Defaults to None
+    (no ceiling, legacy behavior).
 
     ``masked_eval_sanity_probe`` (default False): when True, after the
     post-warm-start eval each stage also runs a one-shot greedy eval on
@@ -1224,10 +1235,16 @@ def train_curriculum(
     prev_ws_pool: Optional[List[str]] = None
     # Tracks whether a previous stage's post-WS success exceeded
     # ``warm_start_max_post_ws_success``. Once tripped, subsequent stages skip
-    # warm-start entirely so ES has headroom to demonstrate gain. The trip is
-    # one-way (we don't re-enable warm-start on later, harder stages) because
-    # carrying the warm-started head forward is the explicit design intent of
-    # the curriculum -- only the *additional* CE budget per stage is suppressed.
+    # warm-start **only if their training secret pool did not change relative
+    # to the previous stage**. When the pool grows, new CE targets become
+    # available (head rows for newly-in-pool words have never been fit under
+    # either supervised warm-start or ES-on-argmax, which only rewards rows
+    # for current-pool secrets), and warm-start is re-permitted regardless of
+    # the trip state. This fixes the mid-curriculum failure mode where a
+    # saturated pool=N stage (e.g. post-WS=88% at N=96) would permanently
+    # starve every later, larger pool of CE, dropping the head's effective
+    # competence proportional to the fraction of pool words with
+    # never-trained action-head rows.
     warm_start_ceiling_tripped = False
     for stage_idx, target_n in enumerate(vocab_schedule):
         prev_n = len(policy.words)
@@ -1277,14 +1294,17 @@ def train_curriculum(
                 env_eval.set_target_pool(ws_pool)
 
         ws_steps_stage = per_stage_warm_steps[stage_idx]
-        if warm_start_ceiling_tripped:
-            # A prior stage already saturated post-WS success above the
-            # configured ceiling; suppress further CE here so ES has room
-            # to act. We zero the budget rather than skipping the step
-            # entirely so the bookkeeping (ws_pool tracking, post-WS eval)
-            # still runs and the per-stage history rows stay consistent.
-            ws_steps_stage = 0
         ws_pool_changed = prev_ws_pool != ws_pool
+        if warm_start_ceiling_tripped and not ws_pool_changed:
+            # A prior stage already saturated post-WS success above the
+            # configured ceiling AND this stage's pool is identical, so
+            # further CE would just refit the same labels. Zero the budget
+            # but keep bookkeeping (post-WS eval still runs below so the
+            # per-stage history rows stay consistent). When the pool DID
+            # change, we fall through and run warm-start normally -- the
+            # new-in-pool words need their head rows fit even if the old
+            # ones were already saturated.
+            ws_steps_stage = 0
         if verbose:
             if holdout_mode == "episode":
                 pool_desc = (
@@ -1393,9 +1413,10 @@ def train_curriculum(
             if verbose:
                 print(
                     f"  [ceiling] post-WS in-dist {post_ws_indist:.1%} >= "
-                    f"{warm_start_max_post_ws_success:.0%}; suppressing warm-start "
-                    f"for stages {stage_idx + 2}-{len(vocab_schedule)} to leave ES "
-                    f"headroom on harder pools."
+                    f"{warm_start_max_post_ws_success:.0%}; warm-start will be "
+                    f"suppressed on subsequent stages *only when their secret "
+                    f"pool is unchanged*. Pool-growing stages still get CE to "
+                    f"fit newly-in-pool action-head rows."
                 )
         if verbose:
             tag = "post-warm-start" if ran_warm_start else "post-expand (no warm-start)"

@@ -228,6 +228,15 @@ def main() -> None:
         int(os.environ.get("EXP2_WARM_START_STEPS", "200"))
     ]
     PER_ITER_SECRET_SUBSET_SIZE = int(os.environ.get("EXP2_SUBSET_SIZE", "4"))
+    # Session 8 (overshoot follow-up) toggles. Defaults keep the runner
+    # backward-compatible with the Session 7 verdict lines so a run without
+    # these env vars reproduces the original Exp 2 behavior -- except we now
+    # always track best-by-greedy by default because the overshoot diagnosis
+    # is the whole point of this iteration of the runner.
+    RESTORE_BEST = bool(int(os.environ.get("EXP2_RESTORE_BEST", "1")))
+    EVAL_STOCHASTIC_EVERY = int(
+        os.environ.get("EXP2_EVAL_STOCHASTIC_EVERY", str(EVAL_EVERY))
+    )
 
     require_chat_template_support()
     MODEL_LOAD_KWARGS, dtype_name = default_model_load_kwargs(DEVICE)
@@ -241,7 +250,8 @@ def main() -> None:
         f"=== EXPERIMENT 2: mini-batch ES under CRN | VOCAB_SCHEDULE={VOCAB_SCHEDULE} "
         f"PER_ITER_SECRET_SUBSET_SIZE={PER_ITER_SECRET_SUBSET_SIZE} "
         f"N_ITERATIONS={N_ITERATIONS} N_POP={N_POP} n_eval_episodes={N_EVAL_EPISODES} "
-        f"baseline_subtract={BASELINE_SUBTRACT} ema_beta={EMA_BETA} ==="
+        f"baseline_subtract={BASELINE_SUBTRACT} ema_beta={EMA_BETA} "
+        f"restore_best={RESTORE_BEST} eval_stochastic_every={EVAL_STOCHASTIC_EVERY} ==="
     )
     print(f"WARM_START_STEPS_PER_STAGE = {WARM_START_STEPS_PER_STAGE}")
 
@@ -408,16 +418,17 @@ def main() -> None:
         ema_beta=EMA_BETA,
         baseline_subtract=BASELINE_SUBTRACT,
         per_iter_secret_subset_size=PER_ITER_SECRET_SUBSET_SIZE,
+        restore_best_at_stage_end=RESTORE_BEST,
+        eval_stochastic_every=EVAL_STOCHASTIC_EVERY,
     )
 
-    # --- Explicit post-run stochastic eval on the full 16-word pool ------------
-    # history's eval_success is greedy. We also want stochastic to sanity-check
-    # against the Exp 1 saturation trap.
-    end_greedy, end_stoch = _eval_greedy_and_stochastic(
-        policy, env_eval, EVAL_N_EPISODES, probe_seed=SEED + 9001
-    )
-
-    # --- Per-iter table + verdict ----------------------------------------------
+    # --- Per-iter table ---------------------------------------------------------
+    # Printed before the post-run eval below because the verdict grades against
+    # history's greedy trajectory (which reflects the state BEFORE any
+    # restore-best reload) plus ``best_eval_success`` returned by
+    # ``train_curriculum``. The external ``_eval_greedy_and_stochastic`` call is
+    # then a separate sanity check on the CURRENT policy (== best iterate when
+    # RESTORE_BEST=1, == final iterate otherwise).
     train_iters = list(history.get("train_iter", []))
     train_cos = list(history.get("train_grad_cos", []))
     train_pop_std = list(history.get("pop_fitness_std", []))
@@ -445,23 +456,49 @@ def main() -> None:
 
     eval_iters = list(history.get("iteration", []))
     eval_succs = list(history.get("eval_success", []))
-    print("\n=== Per-iter eval rollouts (greedy, on full 16-word pool) ===")
-    for it, s in zip(eval_iters, eval_succs):
-        print(f"  iter={it:>4}  eval_success={s:.1%}")
+    eval_stoch_succs = list(history.get("eval_success_stochastic", []))
+    print("\n=== Per-iter eval rollouts (full 16-word pool) ===")
+    if eval_stoch_succs and len(eval_stoch_succs) == len(eval_succs):
+        for it, sg, ss in zip(eval_iters, eval_succs, eval_stoch_succs):
+            print(f"  iter={it:>4}  greedy={sg:.1%}  stochastic={ss:.1%}")
+    else:
+        for it, s in zip(eval_iters, eval_succs):
+            print(f"  iter={it:>4}  greedy={s:.1%}")
 
+    # --- Headline metrics -------------------------------------------------------
     post_ws_indist = float(
         history.get("post_warmstart_success_indist", [float("nan")])[0]
     )
-    end_es_greedy_history = float(eval_succs[-1]) if eval_succs else float("nan")
+    final_greedy = float(eval_succs[-1]) if eval_succs else float("nan")
+    final_stochastic = (
+        float(eval_stoch_succs[-1]) if eval_stoch_succs else float("nan")
+    )
+    # Best trajectory values. When RESTORE_BEST=1 these come from the
+    # train_curriculum tracker (same greedy eval used at each iter); when
+    # RESTORE_BEST=0 we fall back to the per-iter max of the history.
+    best_iter_list = list(history.get("best_iter", []))
+    best_eval_list = list(history.get("best_eval_success", []))
+    if best_iter_list and best_eval_list:
+        best_iter_idx = int(best_iter_list[-1])
+        best_greedy = float(best_eval_list[-1])
+    else:
+        best_iter_idx = (
+            int(eval_iters[int(np.argmax(eval_succs))]) if eval_succs else -1
+        )
+        best_greedy = float(max(eval_succs)) if eval_succs else float("nan")
+    best_stochastic = (
+        float(max(eval_stoch_succs)) if eval_stoch_succs else float("nan")
+    )
+
+    # Post-run eval on CURRENT policy (== restored best iterate when
+    # RESTORE_BEST=1). Provides a stochastic companion for `best_greedy`.
+    end_greedy, end_stoch = _eval_greedy_and_stochastic(
+        policy, env_eval, EVAL_N_EPISODES, probe_seed=SEED + 9001
+    )
 
     ws_gain_greedy = post_ws_indist - pre_ws_greedy
-    es_gain_greedy = end_es_greedy_history - post_ws_indist
-
-    # Stochastic version: we lack a post-WS stochastic measurement mid-pipeline,
-    # so we compare pre-WS stochastic to final stochastic and attribute the
-    # delta to WS+ES jointly. For "ES credit" purposes this is a ceiling, not
-    # a perfect decomposition -- see the greedy numbers for the strict test.
-    joint_gain_stoch = end_stoch - pre_ws_stoch
+    es_gain_best_greedy = best_greedy - post_ws_indist
+    es_gain_final_greedy = final_greedy - post_ws_indist
 
     nonzero_dprobe = [d for d in train_dprobe if d == d and abs(d) > 1e-9]
     eval_dprobe_total = sum(1 for d in train_dprobe if d == d)
@@ -469,56 +506,87 @@ def main() -> None:
         len(nonzero_dprobe) / max(1, eval_dprobe_total) if eval_dprobe_total else 0.0
     )
 
-    print("\n=== EXPERIMENT 2 SUMMARY ===")
-    print("  [GREEDY, full 16-word pool, deterministic argmax]")
-    print(f"    pre-warm-start success      : {pre_ws_greedy:.1%}")
+    print("\n=== EXPERIMENT 2 (overshoot follow-up) SUMMARY ===")
+    print(f"  restore_best={RESTORE_BEST}  eval_stochastic_every={EVAL_STOCHASTIC_EVERY}")
+    print("\n  [GREEDY, full 16-word pool, deterministic argmax]")
+    print(f"    pre-warm-start              : {pre_ws_greedy:.1%}")
     print(
-        f"    post-warm-start success     : {post_ws_indist:.1%}   "
+        f"    post-warm-start             : {post_ws_indist:.1%}   "
         f"(ws_gain = {ws_gain_greedy:+.1%})"
     )
     print(
-        f"    post-ES success (final)     : {end_es_greedy_history:.1%}   "
-        f"(es_gain = {es_gain_greedy:+.1%})"
+        f"    final_greedy (last iter)    : {final_greedy:.1%}   "
+        f"(final − post_ws = {es_gain_final_greedy:+.1%})"
     )
-    if eval_succs:
-        peak_es = max(eval_succs)
-        print(f"    peak eval_success (any iter): {peak_es:.1%}")
-
-    print("  [STOCHASTIC, full 16-word pool, temp-1 sampling]")
-    print(f"    pre-warm-start success      : {pre_ws_stoch:.1%}")
     print(
-        f"    final (post-WS+ES) success  : {end_stoch:.1%}   "
-        f"(joint_gain = {joint_gain_stoch:+.1%})"
+        f"    best_greedy (iter={best_iter_idx:>3})        : {best_greedy:.1%}   "
+        f"(best − post_ws = {es_gain_best_greedy:+.1%})"
     )
 
+    print("\n  [STOCHASTIC, full 16-word pool, temp-1 sampling]")
+    print(f"    pre-warm-start              : {pre_ws_stoch:.1%}")
+    print(f"    final_stochastic            : {final_stochastic:.1%}")
+    print(f"    best_stochastic             : {best_stochastic:.1%}")
     print(
-        f"  dprobe non-zero fraction    : {len(nonzero_dprobe)}/{eval_dprobe_total} = "
+        f"    post-run eval (current θ)   : greedy={end_greedy:.1%}  "
+        f"stochastic={end_stoch:.1%}   "
+        f"{'[should ≈ best_* because RESTORE_BEST=1]' if RESTORE_BEST else '[should ≈ final_* because RESTORE_BEST=0]'}"
+    )
+
+    print(
+        f"\n  dprobe non-zero fraction    : {len(nonzero_dprobe)}/{eval_dprobe_total} = "
         f"{nonzero_frac:.0%}"
     )
 
-    pass_es_gain_greedy_10 = (es_gain_greedy == es_gain_greedy) and (
-        es_gain_greedy >= 0.10
+    # --- Verdict (Section 3, grade against best_greedy) ------------------------
+    # PASS-A: best_greedy − post_ws_greedy ≥ +10pp AND final_greedy ≥ post_ws_greedy
+    #         AND dprobe non-zero fraction ≥ 25%.
+    # PASS-B: best_greedy ≥ +10pp but final_greedy < best_greedy − 10pp
+    #         → best-iter restore is load-bearing; hypothesis confirmed.
+    # FAIL:   neither.
+    lift_10pp = (es_gain_best_greedy == es_gain_best_greedy) and (
+        es_gain_best_greedy >= 0.10
+    )
+    final_not_below_post_ws = (
+        final_greedy == final_greedy
+        and post_ws_indist == post_ws_indist
+        and final_greedy >= post_ws_indist
+    )
+    final_collapsed_from_best = (
+        final_greedy == final_greedy
+        and best_greedy == best_greedy
+        and (best_greedy - final_greedy) >= 0.10
     )
     pass_dprobe = nonzero_frac >= 0.25
 
+    pass_a = lift_10pp and final_not_below_post_ws and pass_dprobe
+    pass_b = lift_10pp and final_collapsed_from_best and not pass_a
+
     print(
-        f"\n  PASS criteria (experiment brief):\n"
-        f"    greedy es_gain >= +10pp  -> {pass_es_gain_greedy_10}\n"
-        f"    dprobe non-zero >=25%    -> {pass_dprobe}"
+        f"\n  Verdict inputs:\n"
+        f"    best_greedy − post_ws >= +10pp    -> {lift_10pp}\n"
+        f"    final_greedy >= post_ws_greedy    -> {final_not_below_post_ws}\n"
+        f"    best_greedy − final_greedy >= 10pp-> {final_collapsed_from_best}\n"
+        f"    dprobe non-zero >= 25%            -> {pass_dprobe}"
     )
 
-    if pass_es_gain_greedy_10 and pass_dprobe:
+    if pass_a:
         print(
-            "\n  VERDICT: PASS. Mini-batch ES under CRN recovered signal at vocab=16; "
-            "the week-12 bottleneck-fix hypothesis is validated."
+            "\n  VERDICT: PASS-A. best_greedy clears the +10pp bar, final_greedy "
+            "holds above post-WS, and dprobe fires on ≥25% of iters. Step-size / "
+            "overshoot hypothesis confirmed and ES converges on its own."
+        )
+    elif pass_b:
+        print(
+            "\n  VERDICT: PASS-B. best_greedy clears the +10pp bar but final_greedy "
+            "collapsed ≥10pp below best; best-iter restore is load-bearing. "
+            "Step-size / overshoot hypothesis confirmed (restore_best_at_stage_end "
+            "is the mitigation)."
         )
     else:
         print(
-            "\n  VERDICT: FAIL (brief criteria). Review the per-iter table + stochastic "
-            "numbers. If stochastic climbed but greedy didn't, it's a metric-saturation "
-            "issue like Exp 1. If both are flat but dprobe non-zero fires, calibration "
-            "or step-size may be the next axis to tune. If dprobe is zero-dominated, "
-            "the subset-CRN plumbing is suspect -- re-verify."
+            "\n  VERDICT: FAIL. Neither PASS-A nor PASS-B satisfied. Proceed to "
+            "Section 4 (sticky 4-word subset via EXP2_SUBSET_REFRESH_EVERY)."
         )
 
 

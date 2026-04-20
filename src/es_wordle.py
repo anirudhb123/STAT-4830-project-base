@@ -523,6 +523,8 @@ def train_es_wordle(
     probe_seed: int = 1234567,
     baseline_subtract: bool = False,
     per_iter_secret_subset_size: Optional[int] = None,
+    restore_best_at_stage_end: bool = False,
+    eval_stochastic_every: Optional[int] = None,
 ) -> Dict[str, List]:
     """
     Train policy using Evolution Strategies on Wordle.
@@ -578,6 +580,28 @@ def train_es_wordle(
             before each iteration's periodic-eval rollouts (so eval_success still
             measures the full pool). ``None`` (default) keeps the legacy behavior.
             See ``es_gradient_estimate_wordle`` for the underlying implementation.
+        restore_best_at_stage_end: If True, track the best-by-greedy-eval iterate during
+            this ES run (``best_eval_success``, ``best_iter``, ``best_state`` as a CPU
+            clone of ``policy.state_dict()``) and return it via the history dict under
+            ``history["best_iter"]`` (1-element list), ``history["best_eval_success"]``
+            (1-element list), and ``history["best_state"]`` (the actual state dict). The
+            caller (e.g. ``train_curriculum``) is responsible for ``load_state_dict``-ing
+            it back into the policy at the end of the stage. The CPU clone is only
+            allocated when this flag is True -- the legacy default (False) has zero
+            memory / runtime overhead. Rationale: under rotating mini-batch objectives
+            (``per_iter_secret_subset_size`` active), ALPHA calibrated at iter 0 is
+            tuned to a stationary objective and can overshoot when the objective rotates
+            each iter; best-iter restore decouples "did ES find a good iterate?" from
+            "did ES converge?".
+        eval_stochastic_every: If set to ``m``, also run ``quick_eval_success(...,
+            stochastic=True)`` on the same ``eval_env`` at every iter where the greedy
+            eval fires AND ``iteration % m == 0`` (typically ``m == eval_every``). Results
+            are appended to ``history["eval_success_stochastic"]``. The stochastic eval
+            is wrapped in the same RNG snapshot/restore as ``_run_probe`` so it does not
+            perturb the outer ES stream. Deterministically seeded (``probe_seed + 7000 +
+            iteration``) so across-iter comparisons are apples-to-apples. ``None``
+            (default) skips the stochastic eval entirely; ``history["eval_success_stochastic"]``
+            is still initialized as an empty list so callers can read it unconditionally.
 
     Returns:
         history: Dictionary with training history
@@ -615,11 +639,29 @@ def train_es_wordle(
     history["train_ess_rank"] = []
     history["train_win_count"] = []
     history["train_probe_delta"] = []
+    # Populated on every iter where greedy eval fires and
+    # ``iteration % eval_stochastic_every == 0``; empty list when
+    # ``eval_stochastic_every is None``. Same cadence as history["eval_success"]
+    # when eval_stochastic_every == eval_every, so downstream plots can zip them.
+    history["eval_success_stochastic"] = []
+    # Populated once per call when ``restore_best_at_stage_end`` is True (single-element
+    # lists); left empty otherwise. ``best_state`` is the actual CPU-cloned state_dict
+    # the caller needs to ``load_state_dict`` back -- callers that persist ``history``
+    # should pop this key first (it's a full model copy).
+    history["best_iter"] = []
+    history["best_eval_success"] = []
 
     use_ema = ema_beta > 0.0
     g_ema: Optional[torch.Tensor] = None
     prev_raw_gradient: Optional[torch.Tensor] = None
     policy_device = next(policy.parameters()).device
+
+    # Best-iter tracking (only allocate the state clone when the flag is True so
+    # the legacy path has no memory overhead). best_iter = -1 sentinel for
+    # "never saw an eval checkpoint" (should not happen with eval_every < n_iters).
+    best_eval_success: float = float("-inf")
+    best_iter_idx: int = -1
+    best_state: Optional[Dict[str, torch.Tensor]] = None
 
     def _run_probe() -> float:
         """Greedy rollout on a fixed slate of secrets. Snapshots+restores RNG so the probe
@@ -821,9 +863,72 @@ def train_es_wordle(
             history['eval_success'].append(eval_success)
             history['eval_turns'].append(eval_turns)
             history['gradient_norm'].append(grad_norm)
-            
+
+            # Stochastic-sampling eval companion to greedy eval_success. Fires at the
+            # same cadence as the greedy eval when ``eval_stochastic_every`` is set
+            # (typically == eval_every so the two lists zip for post-hoc plotting).
+            # Wrapped in RNG snapshot/restore so the stochastic eval does not perturb
+            # the outer ES stream; deterministically seeded so across-iter comparisons
+            # face the same secret slate.
+            if (
+                eval_stochastic_every is not None
+                and (iteration % eval_stochastic_every == 0 or iteration == n_iterations - 1)
+            ):
+                try:
+                    from .wordle_gpt2_warmstart import quick_eval_success as _qes
+                except ImportError:
+                    try:
+                        from wordle_gpt2_warmstart import quick_eval_success as _qes
+                    except ImportError:
+                        _qes = None  # type: ignore
+                if _qes is not None and eval_n_episodes > 0:
+                    _stoch_snap = _snapshot_rng_state(policy_device)
+                    try:
+                        _stoch_seed = int(probe_seed) + 7000 + int(iteration)
+                        random.seed(_stoch_seed)
+                        np.random.seed(_stoch_seed)
+                        torch.manual_seed(_stoch_seed)
+                        if torch.cuda.is_available() and policy_device.type == "cuda":
+                            torch.cuda.manual_seed_all(_stoch_seed)
+                        _stoch_success = float(
+                            _qes(
+                                policy,
+                                eval_env,
+                                n_episodes=eval_n_episodes,
+                                stochastic=True,
+                                max_turns=max_turns,
+                            )
+                        )
+                    finally:
+                        _restore_rng_state(_stoch_snap, policy_device)
+                    history['eval_success_stochastic'].append(_stoch_success)
+
+            # Best-iter tracking. Only allocate the CPU state clone when the flag is
+            # True (legacy path has zero memory overhead). Ties broken by "earliest
+            # wins" (strict > below) so a later regression to the same value doesn't
+            # churn the clone. eval_success is greedy; callers grading against
+            # ``best_greedy`` are comparing apples-to-apples against post_ws_greedy.
+            if restore_best_at_stage_end and eval_success > best_eval_success:
+                best_eval_success = eval_success
+                best_iter_idx = iteration
+                best_state = {
+                    k: v.detach().to("cpu").clone()
+                    for k, v in policy.state_dict().items()
+                }
+
             _cos_str = "  n/a" if grad_cos != grad_cos else f"{grad_cos:+.2f}"
             _dprobe_str = "  n/a" if probe_delta != probe_delta else f"{probe_delta:+.1%}"
+            # Companion stochastic eval printout (only when the stochastic eval fired
+            # on this iteration). Empty string keeps the legacy line format intact
+            # when eval_stochastic_every is None.
+            if (
+                eval_stochastic_every is not None
+                and history['eval_success_stochastic']
+                and (iteration % eval_stochastic_every == 0 or iteration == n_iterations - 1)
+            ):
+                _stoch_str = f" | Stoch: {history['eval_success_stochastic'][-1]:5.1%}"
+            else:
+                _stoch_str = ""
             if verbose:
                 _ev = "greedy" if eval_deterministic else "stoch"
                 _fl = {"return": "ret", "win": "win", "win_plus_return": "win+ret"}.get(
@@ -835,7 +940,7 @@ def train_es_wordle(
                     f"ES_win: {avg_es_win:5.1%} | "
                     f"popσ: {pop_fitness_std:.4f} | "
                     f"Eval Reward: {eval_reward:6.3f} | "
-                    f"Success: {eval_success:5.1%} ({_ev}) | "
+                    f"Success: {eval_success:5.1%} ({_ev}){_stoch_str} | "
                     f"Turns: {eval_turns:4.1f} | "
                     f"Grad‖: {grad_norm:.2f} | "
                     f"Step‖: {step_norm:.4f} | "
@@ -859,7 +964,19 @@ def train_es_wordle(
                 f"‖θ-θ₀‖: {param_drift:.2f} | "
                 f"ess: {ess_rank}/{N} | wins: {win_count}/{N} | (no eval)"
             )
-    
+
+    # Emit best-iter bookkeeping only when the tracker was active. Keeps the
+    # history dict's shape identical to the legacy path when the flag is off
+    # (the two keys were initialized to [] and remain []).
+    if restore_best_at_stage_end and best_iter_idx >= 0:
+        history['best_iter'].append(int(best_iter_idx))
+        history['best_eval_success'].append(float(best_eval_success))
+        # best_state is the actual CPU state dict -- stored under a separate key
+        # (not a list) so callers don't accidentally pickle it as part of a
+        # standard per-eval metric. ``train_curriculum`` pops this after
+        # load_state_dict so it doesn't leak into ``combined``.
+        history['best_state'] = best_state
+
     return history
 
 
@@ -884,6 +1001,11 @@ _PER_EVAL_KEYS = (
     "eval_success",
     "eval_turns",
     "gradient_norm",
+    # Optional: only populated when ``eval_stochastic_every`` is set. Empty list
+    # under the legacy path; extend into ``combined`` is a no-op then. When the
+    # stochastic cadence matches ``eval_every`` (the typical case) this list
+    # zips with ``eval_success`` for greedy-vs-stochastic plots.
+    "eval_success_stochastic",
 )
 
 
@@ -906,6 +1028,8 @@ def train_curriculum(
     holdout_mode: str = "episode",
     masked_eval_sanity_probe: bool = False,
     warm_start_max_post_ws_success: Optional[float] = None,
+    restore_best_at_stage_end: bool = False,
+    eval_stochastic_every: Optional[int] = None,
     **es_kwargs: Any,
 ) -> Dict[str, List]:
     """Curriculum ES: grow the policy/env vocabulary across stages.
@@ -1009,6 +1133,28 @@ def train_curriculum(
     ``policy.expand_vocab(N_i)``. Set False when the policy is pre-built with
     its final action space (e.g. ``max_vocab_size=MAX_VOCAB``) and only the
     secret pool should grow under the curriculum.
+
+    ``restore_best_at_stage_end`` (default False) — when True, each stage tracks
+    the best-by-greedy-eval iterate (CPU-cloned ``policy.state_dict()``) during
+    its ES run and ``load_state_dict``-s it back at the end of the stage.
+    Appends the best iter (globally offset) to ``combined["best_iter"]`` and
+    the corresponding greedy ``eval_success`` to ``combined["best_eval_success"]``.
+    Motivation: under rotating mini-batch objectives (``per_iter_secret_subset_size``
+    active) ALPHA calibrated at iter 0 assumes a stationary objective and can
+    overshoot when the level sets rotate each iter; best-iter restore decouples
+    "did ES find a good iterate?" from "did ES converge?". Default False
+    preserves the legacy behavior and has zero memory overhead.
+
+    ``eval_stochastic_every`` (default None) — when set to an int ``m``, each stage
+    runs ``quick_eval_success(..., stochastic=True)`` on the stage's eval env
+    on every iter where greedy eval fires AND ``iteration % m == 0`` (the
+    typical call site sets ``m == eval_every`` so the stochastic list zips
+    with the greedy one for post-hoc plots). Wrapped in RNG snapshot/restore
+    so the stochastic eval does not perturb the outer ES stream, and
+    deterministically seeded so across-iter comparisons are apples-to-apples.
+    Results are accumulated into ``combined["eval_success_stochastic"]``.
+    Default None skips the stochastic eval entirely (empty list; zero
+    overhead).
 
     The combined history concatenates per-stage histories with iteration indices
     offset to be globally monotonic, plus extra keys:
@@ -1131,6 +1277,13 @@ def train_curriculum(
     combined["stage_post_warmstart_iter"] = []
     combined["stage_holdout_mode"] = []
     combined["stage_masked_post_warmstart_success"] = []
+    # Per-stage best-iterate bookkeeping. Populated only when
+    # ``restore_best_at_stage_end`` is True; empty lists under the legacy path.
+    # ``best_iter`` is stored as a globally-monotonic iteration index (offset
+    # by ``iter_offset`` like other per-eval ``iteration`` entries) so it can
+    # be compared against ``combined["iteration"]`` directly.
+    combined["best_iter"] = []
+    combined["best_eval_success"] = []
 
     iter_offset = 0
     prev_ws_pool: Optional[List[str]] = None
@@ -1369,8 +1522,35 @@ def train_curriculum(
             n_iterations=per_stage_iters[stage_idx],
             verbose=verbose,
             env_eval=env_eval,
+            restore_best_at_stage_end=restore_best_at_stage_end,
+            eval_stochastic_every=eval_stochastic_every,
             **es_kwargs,
         )
+
+        # Restore best-by-greedy-eval iterate (when tracking was active). This
+        # decouples "did ES find a good iterate during this stage?" from "did
+        # ES converge?" -- important under rotating mini-batch objectives
+        # where ALPHA calibrated for a stationary objective can overshoot and
+        # walk away from a strong mid-run iterate. Popping ``best_state`` off
+        # the history dict avoids leaking a full CPU model copy into
+        # ``combined`` (which callers often pickle).
+        best_state_dict = stage_history.pop("best_state", None)
+        if (
+            restore_best_at_stage_end
+            and stage_history.get("best_iter")
+            and best_state_dict is not None
+        ):
+            stage_best_iter = int(stage_history["best_iter"][0])
+            stage_best_succ = float(stage_history["best_eval_success"][0])
+            policy.load_state_dict(best_state_dict, strict=False)
+            if verbose:
+                print(
+                    f"  [restore-best] stage {stage_idx + 1}: restored iter "
+                    f"{stage_best_iter} (eval_success={stage_best_succ:.1%})",
+                    flush=True,
+                )
+            combined["best_iter"].append(stage_best_iter + iter_offset)
+            combined["best_eval_success"].append(stage_best_succ)
 
         prev_ws_pool = ws_pool
 
@@ -1383,7 +1563,9 @@ def train_curriculum(
             if k == "iteration":
                 combined[k].extend(int(i) + iter_offset for i in stage_history[k])
             else:
-                combined[k].extend(stage_history[k])
+                # ``eval_success_stochastic`` is empty when
+                # ``eval_stochastic_every is None`` (legacy path) -- safe extend.
+                combined[k].extend(stage_history.get(k, []))
 
         combined["stage_starts"].append(iter_offset)
         combined["stage_vocab_sizes"].append(new_n)

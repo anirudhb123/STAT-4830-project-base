@@ -21,7 +21,7 @@ Usage (from repo root):
     .venv/bin/python -u scripts/run_experiment2_minibatch_crn.py 2>&1 | \
         tee /tmp/exp2_full.log
 
-Environment overrides (for smoke tests):
+Environment overrides (for smoke tests and the pool-size sweep):
     EXP2_N_ITERATIONS=2          # number of ES iters
     EXP2_WARM_START_STEPS=200    # per-stage warm-start episode budget
     EXP2_SUBSET_SIZE=4           # k for per_iter_secret_subset_size
@@ -41,6 +41,21 @@ Environment overrides (for smoke tests):
                                  #   (so end_greedy / end_stoch measure the
                                  #   peak policy, not the final iterate).
                                  #   Set 0 to keep the final iterate (legacy).
+    EXP2_VOCAB_SIZE=16           # size of the single-stage secret pool
+                                 #   (was hardcoded to 16). Intended for
+                                 #   the "pool size sweep" experiment that
+                                 #   characterizes where the task becomes
+                                 #   intractable as the secret pool grows.
+                                 #   Run repeatedly at different values
+                                 #   (e.g. 16, 32, 64, 128) with everything
+                                 #   else held constant to produce comparable
+                                 #   data points. Note: this is the SECRET
+                                 #   POOL, not the action head width — the
+                                 #   head is still MAX_VOCAB=1024 regardless,
+                                 #   so policy.words is the same across runs
+                                 #   and the only thing that changes is which
+                                 #   words the env can pick as the hidden
+                                 #   answer. Assertion enforces <= MAX_VOCAB.
 """
 from __future__ import annotations
 
@@ -224,7 +239,17 @@ def main() -> None:
     WARM_START_FEEDBACK_CONSISTENT = True
 
     # === ACTIVE_EXPERIMENT = 'exp2' ===
-    VOCAB_SCHEDULE = [16]
+    # Single-stage secret pool size. Default 16 reproduces the original
+    # Exp 2 design. Override EXP2_VOCAB_SIZE to sweep (e.g. 32, 64, 128)
+    # and produce comparable data points characterizing the pool-size ->
+    # accuracy curve. Multi-stage sweeps are deliberately not supported
+    # here; run the script multiple times so each run has its own ALPHA
+    # calibration, warm-start, and best-iter snapshot — that's what makes
+    # the data points comparable.
+    VOCAB_SIZE = int(os.environ.get("EXP2_VOCAB_SIZE", "16"))
+    if VOCAB_SIZE < 1:
+        raise ValueError(f"EXP2_VOCAB_SIZE must be >= 1, got {VOCAB_SIZE}.")
+    VOCAB_SCHEDULE = [VOCAB_SIZE]
     N_ITERATIONS = int(os.environ.get("EXP2_N_ITERATIONS", "30"))
     HOLDOUT_MODE = "episode"
     SECRET_HOLDOUT_FRAC = 0.2  # ignored in episode mode
@@ -232,6 +257,12 @@ def main() -> None:
     # Keep action head wide (1024) so the mock-targets assertion holds and
     # the geometry matches gemma_full's stage-1 setup (wide head, narrow pool).
     MAX_VOCAB = 1024
+    if VOCAB_SIZE > MAX_VOCAB:
+        raise ValueError(
+            f"EXP2_VOCAB_SIZE={VOCAB_SIZE} exceeds the action head width "
+            f"MAX_VOCAB={MAX_VOCAB}. Either raise MAX_VOCAB or lower "
+            f"EXP2_VOCAB_SIZE."
+        )
 
     SECRET_POOL_SIZES = list(VOCAB_SCHEDULE)
     EVAL_POOL_SIZES = [0 for _ in SECRET_POOL_SIZES]
@@ -260,6 +291,45 @@ def main() -> None:
         f"baseline_subtract={BASELINE_SUBTRACT} ema_beta={EMA_BETA} ==="
     )
     print(f"WARM_START_STEPS_PER_STAGE = {WARM_START_STEPS_PER_STAGE}")
+
+    # Signal-density headline: visits/secret/iter under CRN. The week-12
+    # probe showed ES only produces a learnable signal when this is >= ~4
+    # (Test B). Because `per_iter_secret_subset_size` pins the per-iter
+    # secret count to `PER_ITER_SECRET_SUBSET_SIZE` regardless of global
+    # pool size, the ratio below is independent of VOCAB_SIZE — which is
+    # exactly the point of the sweep: you can bump VOCAB_SIZE and *not*
+    # slide into the lottery regime. What does change with pool size is
+    # (a) how much the objective rotates between iters (larger pool =
+    # more distinct subsets to cycle through) and (b) how hard end-of-run
+    # greedy eval on the full pool is.
+    _visits_per_secret_per_iter = N_EVAL_EPISODES / max(1, PER_ITER_SECRET_SUBSET_SIZE)
+    _n_distinct_subsets = max(1, VOCAB_SIZE // max(1, PER_ITER_SECRET_SUBSET_SIZE))
+    print(
+        f"[signal density] visits/secret/iter = {_visits_per_secret_per_iter:.1f} "
+        f"(n_eval={N_EVAL_EPISODES} / subset_size={PER_ITER_SECRET_SUBSET_SIZE}); "
+        f"~{_n_distinct_subsets} distinct subsets to rotate through at VOCAB_SIZE={VOCAB_SIZE}."
+    )
+    if _visits_per_secret_per_iter < 2.0:
+        print(
+            "[signal density] WARNING: visits/secret/iter < 2 — this is the "
+            "lottery regime the week-12 probe identified. Consider raising "
+            "EXP2_SUBSET_SIZE's n_eval ratio before interpreting any result "
+            "from this run as a property of the pool size."
+        )
+    # Rule-of-thumb warm-start scaling: the default 200 was calibrated at
+    # VOCAB_SIZE=16. At larger pool sizes the CE task has more classes, so
+    # 200 episodes is often too short and post-WS success looks artificially
+    # low (which then looks like "the policy can't learn this vocab" but is
+    # really "CE didn't have enough data"). Print a note but don't auto-scale
+    # — the user may be deliberately holding WS constant to isolate the
+    # post-WS / ES contribution at each pool size.
+    if VOCAB_SIZE > 32 and WARM_START_STEPS_PER_STAGE[0] <= 200:
+        print(
+            f"[warm-start] NOTE: EXP2_WARM_START_STEPS={WARM_START_STEPS_PER_STAGE[0]} "
+            f"at VOCAB_SIZE={VOCAB_SIZE} may be short; at vocab=128 a ~4x budget "
+            f"(~800) is a reasonable first try if post-WS looks poor. Holding it "
+            f"constant is fine for a controlled sweep — just know it's a factor."
+        )
 
     random.seed(SEED)
     np.random.seed(SEED)

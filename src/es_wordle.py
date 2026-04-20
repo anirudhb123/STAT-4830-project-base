@@ -218,6 +218,8 @@ def es_gradient_estimate_wordle(
     win_fitness_scale: float = 5.0,
     antithetic: bool = False,
     common_random_numbers: bool = False,
+    baseline_subtract: bool = False,
+    per_iter_secret_subset_size: Optional[int] = None,
 ) -> Tuple[torch.Tensor, float, List[float], float, float, List[float]]:
     """
     Estimate gradient using Evolution Strategies for Wordle.
@@ -234,7 +236,8 @@ def es_gradient_estimate_wordle(
         sigma: Noise scale
         n_eval_episodes: Episodes per perturbation evaluation
         max_turns: Max turns per episode (6 for Wordle)
-        rank_fitness: If True, use centered ranks instead of z-scoring (often better for small N)
+        rank_fitness: If True, use centered ranks instead of z-scoring (often better for small N).
+            Ignored when ``baseline_subtract=True``.
         fitness_objective: What ES maximizes per perturbation:
             ``"return"`` — mean episode return (default; partial credit inflates Fitness).
             ``"win"`` — mean win rate only (sparse; often needs rank_fitness and larger N).
@@ -247,6 +250,33 @@ def es_gradient_estimate_wordle(
             the start of the estimate and restore it before each perturbation's evaluation,
             so every population member faces the same secret words and sampling draws. The
             outer RNG state is restored (and advanced once per call) before returning.
+        baseline_subtract: If True, replace the rank/z-score fitness shaping with raw
+            baseline-subtracted fitness (PGPE-lite). For non-antithetic populations the
+            shaped fitness is ``F - mean(F)``; for antithetic populations it is the per-pair
+            difference ``F_+i - F_-i`` (assigned with sign ``+`` to the ``+ε`` member and
+            ``-`` to the ``-ε`` member). No std normalization. The motivation: when most
+            population members tie at "lost everything" (the dominant regime when
+            ``wins/N`` is small), rank-fitness collapses the bulk to identical ranks and
+            then ``std(ranks)`` is dominated by the few discriminating positions, which
+            *renormalizes away* the magnitude of the win signal that
+            ``win_fitness_scale`` injects. Raw baseline subtraction preserves that
+            magnitude — a member that wins gets fitness ``~ win_fitness_scale + return``
+            while the bulk gets ``~ return``, so the centered signal is sharply peaked
+            on the winners. Takes precedence over ``rank_fitness`` when both are True.
+        per_iter_secret_subset_size: If set to ``k``, draw ``k`` secrets uniformly at
+            random (without replacement) from the env's current target pool at the START
+            of this iteration and temporarily restrict the iteration's secret pool to
+            that subset. Under CRN, every population member then plays the same ``k``
+            secrets, so each member sees each subset secret ~``n_eval_episodes / k``
+            times in expectation -- this is the "mini-batch ES under CRN" regime that
+            unlocks the signal-density bottleneck identified in week 12 (critiqueWeek12.md
+            and docs/llm_exploration/week12_log.md). The env's target pool is restored
+            before the function returns, regardless of success. ``None`` (default) keeps
+            the env's full target pool for the iteration (legacy behavior). Requires the
+            env to be ``_LocalWordleDataset``-backed (which is the case for every code
+            path that goes through ``WordleEnvironmentWrapper.set_target_pool`` --
+            Prime Intellect's dataset-of-prompts is not supported and will raise).
+            When ``k`` is >= the current pool size, the call is a no-op on the pool.
 
     Returns:
         gradient: Estimated gradient (flattened parameter vector)
@@ -284,31 +314,74 @@ def es_gradient_estimate_wordle(
     else:
         perturbations = [torch.randn(n_params, device=policy_device) for _ in range(N)]
 
-    # Snapshot RNG *after* sampling perturbations so each iteration's CRN stream
-    # depends on the current outer RNG but is identical across population members.
-    crn_snapshot: Optional[dict] = None
-    outer_snapshot: Optional[dict] = None
-    if common_random_numbers:
-        outer_snapshot = _snapshot_rng_state(policy_device)
-        crn_snapshot = outer_snapshot
+    # Mini-batch ES under CRN: temporarily subset the env's secret pool to ``k``
+    # words for this iteration. Under CRN every member sees the same ``k``
+    # secrets, so each secret is revisited ~n_eval_episodes/k times per member
+    # per iter -- the signal-density regime Test B identified as the working
+    # regime for ES on Wordle. Installed BEFORE the CRN snapshot so the snapshot
+    # captures the post-subset numpy/torch state (otherwise restoring RNG before
+    # each member would re-roll the subset across members, defeating CRN). Must
+    # be restored in a ``finally`` so an exception in the eval loop doesn't
+    # leave the env pinned to a subset across future iterations.
+    original_targets: Optional[List[str]] = None
+    if per_iter_secret_subset_size is not None:
+        prime = getattr(env, "prime_env", None)
+        ds = getattr(prime, "dataset", None) if prime is not None else None
+        if ds is None or not hasattr(ds, "targets"):
+            raise ValueError(
+                "per_iter_secret_subset_size requires the env to be backed by a "
+                "_LocalWordleDataset (WordleEnvironmentWrapper with a target_pool "
+                "or fallen back to the bundled answer list). Prime Intellect "
+                "dataset-of-prompts envs are not supported by this feature."
+            )
+        k = int(per_iter_secret_subset_size)
+        if k < 1:
+            raise ValueError(
+                f"per_iter_secret_subset_size must be >= 1, got {k}."
+            )
+        original_targets = list(ds.targets)
+        if k < len(original_targets):
+            subset_idx = np.random.choice(
+                len(original_targets), size=k, replace=False
+            )
+            subset_words = [original_targets[int(i)] for i in subset_idx]
+            env.set_target_pool(subset_words)
+        # else: k >= pool size -> no-op on the pool; original_targets is still
+        # tracked so the ``finally`` re-install is safe.
 
-    fitness_values: List[float] = []
-    es_win_rates: List[float] = []
+    try:
+        # Snapshot RNG *after* sampling perturbations (and *after* the optional
+        # subset draw above) so each iteration's CRN stream depends on the
+        # current outer RNG but is identical across population members.
+        crn_snapshot: Optional[dict] = None
+        outer_snapshot: Optional[dict] = None
+        if common_random_numbers:
+            outer_snapshot = _snapshot_rng_state(policy_device)
+            crn_snapshot = outer_snapshot
 
-    for epsilon in perturbations:
-        if crn_snapshot is not None:
-            _restore_rng_state(crn_snapshot, policy_device)
+        fitness_values: List[float] = []
+        es_win_rates: List[float] = []
 
-        mean_ret, wr = _evaluate_perturbation(
-            policy, env, params + sigma * epsilon, n_eval_episodes, max_turns
-        )
-        es_win_rates.append(wr)
-        if fitness_objective == "return":
-            fitness_values.append(mean_ret)
-        elif fitness_objective == "win":
-            fitness_values.append(float(wr))
-        else:
-            fitness_values.append(win_fitness_scale * float(wr) + mean_ret)
+        for epsilon in perturbations:
+            if crn_snapshot is not None:
+                _restore_rng_state(crn_snapshot, policy_device)
+
+            mean_ret, wr = _evaluate_perturbation(
+                policy, env, params + sigma * epsilon, n_eval_episodes, max_turns
+            )
+            es_win_rates.append(wr)
+            if fitness_objective == "return":
+                fitness_values.append(mean_ret)
+            elif fitness_objective == "win":
+                fitness_values.append(float(wr))
+            else:
+                fitness_values.append(win_fitness_scale * float(wr) + mean_ret)
+    finally:
+        if original_targets is not None:
+            # Restore the env's full target pool so downstream callers
+            # (train_es_wordle's periodic eval, train_curriculum's stage
+            # bookkeeping) see the pool they installed.
+            env.set_target_pool(original_targets)
 
     if outer_snapshot is not None:
         # Advance every RNG that env.reset() / policy sampling actually consumes
@@ -339,7 +412,15 @@ def es_gradient_estimate_wordle(
     fitness_tensor = torch.tensor(fitness_values, dtype=torch.float32, device=policy_device)
     perturbations_tensor = torch.stack(perturbations)
 
-    # Standardize fitness (z-score) or rank-transform (robust for small N).
+    # Fitness shaping. Three mutually-exclusive branches, in priority order:
+    #   1. baseline_subtract=True (overrides everything): raw centered fitness
+    #      with NO std normalization. Antithetic: per-pair diff F_+i - F_-i.
+    #      Non-antithetic: F - mean(F). This preserves the magnitude of the
+    #      win signal (win_fitness_scale * win_rate) that the rank/z-score
+    #      branches renormalize away when most members tie at "lost everything".
+    #   2. rank_fitness=True: centered ranks, std-normalized. Robust to outlier
+    #      fitness values but loses magnitude information.
+    #   3. default: z-score (subtract mean, divide by std).
     #
     # When antithetic=True, perturbations are interleaved as
     #   [+ε_0, -ε_0, +ε_1, -ε_1, ...]
@@ -353,7 +434,19 @@ def es_gradient_estimate_wordle(
         half = N // 2
         f_plus = fitness_tensor[0::2]   # F_+i for i in [0, half)
         f_minus = fitness_tensor[1::2]  # F_-i for i in [0, half)
-        if rank_fitness:
+        if baseline_subtract:
+            # PGPE-lite: per-pair diff is already a within-pair baseline-subtracted
+            # signal. Skip both the rank transform and the std normalization so the
+            # magnitude of the win signal survives into the gradient. The few pairs
+            # with one winner and one loser dominate; the many pairs where both
+            # members lost have diff ≈ 0 and contribute negligibly (instead of
+            # being lifted to a fixed |rank| by the rank transform, where they
+            # would inject noise weighted by the std denominator).
+            diffs = f_plus - f_minus
+            fitness_normalized = torch.empty(N, device=policy_device, dtype=torch.float32)
+            fitness_normalized[0::2] = diffs
+            fitness_normalized[1::2] = -diffs
+        elif rank_fitness:
             diffs = f_plus - f_minus
             order = torch.argsort(diffs, descending=True)
             pair_ranks = torch.zeros(half, device=policy_device, dtype=torch.float32)
@@ -376,6 +469,11 @@ def es_gradient_estimate_wordle(
                 fitness_normalized = (centered - centered.mean()) / fitness_std
             else:
                 fitness_normalized = centered - centered.mean()
+    elif baseline_subtract:
+        # Non-antithetic baseline subtraction: raw mean-centered fitness, no std
+        # normalization. Same magnitude-preservation rationale as the antithetic
+        # branch above.
+        fitness_normalized = fitness_tensor - fitness_tensor.mean()
     elif rank_fitness:
         order = torch.argsort(fitness_tensor, descending=True)
         ranks = torch.zeros(N, device=policy_device, dtype=torch.float32)
@@ -423,6 +521,8 @@ def train_es_wordle(
     env_eval: Optional[Any] = None,
     probe_n_episodes: int = 32,
     probe_seed: int = 1234567,
+    baseline_subtract: bool = False,
+    per_iter_secret_subset_size: Optional[int] = None,
 ) -> Dict[str, List]:
     """
     Train policy using Evolution Strategies on Wordle.
@@ -464,6 +564,20 @@ def train_es_wordle(
         probe_seed: Fixed RNG seed installed before each probe rollout so pre- and post-update
             probes face identical secrets across iterations. The outer RNG state is snapshotted
             and restored around the probe so it does not perturb ES rollouts.
+        baseline_subtract: If True, ES uses raw baseline-subtracted fitness instead of the
+            rank/z-score branches. Recommended when ``wins/N`` is small per iteration (the
+            "most members tie at lost-everything" regime), where rank-fitness collapses the
+            tied bulk to a constant rank and ``std(ranks)`` renormalizes away the magnitude
+            of the win signal that ``win_fitness_scale`` injects. Takes precedence over
+            ``rank_fitness``. See ``es_gradient_estimate_wordle`` for details.
+        per_iter_secret_subset_size: If set to ``k``, each ES iteration draws ``k`` secrets
+            uniformly at random from the env's current target pool and restricts that
+            iteration's fitness eval to those ``k`` secrets (mini-batch ES under CRN).
+            Unlocks the signal-density regime when the global secret pool is larger than
+            ``n_eval_episodes`` would otherwise allow. The env's full pool is restored
+            before each iteration's periodic-eval rollouts (so eval_success still
+            measures the full pool). ``None`` (default) keeps the legacy behavior.
+            See ``es_gradient_estimate_wordle`` for the underlying implementation.
 
     Returns:
         history: Dictionary with training history
@@ -564,6 +678,8 @@ def train_es_wordle(
             win_fitness_scale=win_fitness_scale,
             antithetic=antithetic,
             common_random_numbers=common_random_numbers,
+            baseline_subtract=baseline_subtract,
+            per_iter_secret_subset_size=per_iter_secret_subset_size,
         )
 
         # Cosine between raw ĝ_t and ĝ_{t-1}: positive values indicate a consistent
@@ -789,6 +905,7 @@ def train_curriculum(
     expand_action_space: bool = True,
     holdout_mode: str = "episode",
     masked_eval_sanity_probe: bool = False,
+    warm_start_max_post_ws_success: Optional[float] = None,
     **es_kwargs: Any,
 ) -> Dict[str, List]:
     """Curriculum ES: grow the policy/env vocabulary across stages.
@@ -863,6 +980,15 @@ def train_curriculum(
     constructed (see step 2 above). Defaults to ``"episode"``; pass
     ``"word"`` to restore the prior split-by-suffix behavior.
 
+    ``warm_start_max_post_ws_success`` (default None): when set to a float in
+    ``(0, 1]``, monitors post-warm-start in-distribution success per stage and
+    suppresses warm-start in *all subsequent* stages once any stage exceeds the
+    ceiling. The motivation: if the supervised warm-start already saturates the
+    head (post-WS = 100%), ES has no headroom to improve and the cos(ĝ) signal
+    is structurally zero. Capping at ~0.85 leaves ES ~15 percentage points of
+    headroom per stage so the "is ES doing anything?" signal is observable.
+    Defaults to None (no ceiling, legacy behavior).
+
     ``masked_eval_sanity_probe`` (default False): when True, after the
     post-warm-start eval each stage also runs a one-shot greedy eval on
     ``env_eval`` with logits *masked* to the indices in ``eval_pool`` (i.e.
@@ -929,6 +1055,14 @@ def train_curriculum(
         )
     if not vocab_schedule:
         raise ValueError("vocab_schedule must contain at least one stage size.")
+
+    if warm_start_max_post_ws_success is not None and not (
+        0.0 < warm_start_max_post_ws_success <= 1.0
+    ):
+        raise ValueError(
+            "warm_start_max_post_ws_success must be in (0, 1] when set, got "
+            f"{warm_start_max_post_ws_success}."
+        )
 
     if isinstance(n_iterations_per_stage, int):
         if n_iterations_per_stage <= 0:
@@ -1000,6 +1134,13 @@ def train_curriculum(
 
     iter_offset = 0
     prev_ws_pool: Optional[List[str]] = None
+    # Tracks whether a previous stage's post-WS success exceeded
+    # ``warm_start_max_post_ws_success``. Once tripped, subsequent stages skip
+    # warm-start entirely so ES has headroom to demonstrate gain. The trip is
+    # one-way (we don't re-enable warm-start on later, harder stages) because
+    # carrying the warm-started head forward is the explicit design intent of
+    # the curriculum -- only the *additional* CE budget per stage is suppressed.
+    warm_start_ceiling_tripped = False
     for stage_idx, target_n in enumerate(vocab_schedule):
         prev_n = len(policy.words)
         if expand_action_space:
@@ -1048,6 +1189,13 @@ def train_curriculum(
                 env_eval.set_target_pool(ws_pool)
 
         ws_steps_stage = per_stage_warm_steps[stage_idx]
+        if warm_start_ceiling_tripped:
+            # A prior stage already saturated post-WS success above the
+            # configured ceiling; suppress further CE here so ES has room
+            # to act. We zero the budget rather than skipping the step
+            # entirely so the bookkeeping (ws_pool tracking, post-WS eval)
+            # still runs and the per-stage history rows stay consistent.
+            ws_steps_stage = 0
         ws_pool_changed = prev_ws_pool != ws_pool
         if verbose:
             if holdout_mode == "episode":
@@ -1141,6 +1289,26 @@ def train_curriculum(
         combined["post_warmstart_success_heldout"].append(post_ws_heldout)
         combined["post_warmstart_success_indist"].append(post_ws_indist)
         combined["stage_post_warmstart_iter"].append(iter_offset)
+
+        # Trip the headroom ceiling on in-distribution post-WS success. We use
+        # in-dist (not held-out) because that's the metric warm-start is
+        # actually optimizing -- a saturated in-dist value means CE has fit
+        # the training pool and additional warm-start steps would just refit
+        # the same labels. Once tripped, all subsequent stages skip warm-start.
+        if (
+            warm_start_max_post_ws_success is not None
+            and not warm_start_ceiling_tripped
+            and post_ws_indist == post_ws_indist  # not NaN
+            and post_ws_indist >= warm_start_max_post_ws_success
+        ):
+            warm_start_ceiling_tripped = True
+            if verbose:
+                print(
+                    f"  [ceiling] post-WS in-dist {post_ws_indist:.1%} >= "
+                    f"{warm_start_max_post_ws_success:.0%}; suppressing warm-start "
+                    f"for stages {stage_idx + 2}-{len(vocab_schedule)} to leave ES "
+                    f"headroom on harder pools."
+                )
         if verbose:
             tag = "post-warm-start" if ran_warm_start else "post-expand (no warm-start)"
             mode = "greedy" if post_warm_start_eval_deterministic else "stoch"

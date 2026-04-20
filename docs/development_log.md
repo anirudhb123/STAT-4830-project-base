@@ -1,5 +1,248 @@
 # Development Log
 
+## Week 12 (April 10 - April 19, 2026)
+
+### Overview
+Diagnosed why ES on top of supervised warm-start was contributing zero gain across the Gemma-3-1b + LoRA + 8-stage curriculum pipeline built in Week 11. Six attempts identified the actual bottleneck as the **per-secret revisit count per ES iteration** under common-random-numbers — a property of the eval budget, not of the ES estimator, momentum, or LoRA capacity.
+
+### Key Decisions
+
+**1. Phase A Diagnostic Probe — Add `cos(ĝ)` and `dprobe` Instrumentation (Apr 11)**
+- **Decision:** Treat the existing per-stage warm-start + ES loop as a black box and run an isolated 20-iter ES-only probe on a fixed small secret pool with full diagnostic logging.
+- **Diagnostics added to `src/es_wordle.py`:**
+  - `cos(ĝ_t, ĝ_{t-1})` — cosine between successive raw ES gradients
+  - `dprobe` — pre/post-step greedy-success delta on a fixed-seed probe slate
+  - `‖θ − θ₀‖`, `Step‖`, `Grad‖`, `popσ`, `ess_rank`, `wins/N`
+- **Probe pass criteria:** `median cos(ĝ) > 0.05` AND `eval_success lift ≥ 15pp`
+- **First run verdict:** **FAIL** on both criteria — `cos(ĝ) = -0.000`, eval lift = +12pp.
+
+**2. Phase C Attempt #1 — Baseline-Subtracted ES (PGPE-Lite) (Apr 12-15)**
+- **Decision:** Add a `baseline_subtract=True` branch to `es_gradient_estimate_wordle` that uses raw mean-centered fitness without std-normalization.
+- **Rationale:** When most population members tie at "lost everything", rank-fitness compresses the bulk to identical ranks and `std(ranks)` renormalizes away the magnitude of the sparse win signal that `win_fitness_scale=8` injects.
+- **Implementation:** `BASELINE_SUBTRACT` hyperparameter in cell 4, threaded through both probe (cell 10) and production run (cell 12).
+- **Result:** **Failed.** `cos(ĝ)` still `±0.00`, `Step‖` decayed 0.13 → 0.026, `dprobe` non-zero on 1/14 iters.
+
+**3. Phase C Attempt #2 — Disable EMA Momentum (Apr 16)**
+- **Decision:** Set `EMA_BETA = 0.9 → 0.0`.
+- **Diagnosis:** With successive raw gradients uncorrelated (`cos(ĝ) ≈ 0`), EMA was a low-pass filter averaging signal toward zero. Per-iter raw gradient norm was stable (~4000), but post-EMA `Grad‖` decayed monotonically 3953 → 802 over 13 iters.
+- **Result:** Mechanism healthier — `Grad‖` no longer decays, `dprobe` non-zero on ~half the eval iters with mixed signs (+9.4%, −9.4%, +9.4%). But fresh-secret `Success` still bouncing 0–12% — improvements were secret-specific, not transferable. **Verdict: still fail.**
+
+**4. Test A — LoRA Capacity (Apr 17)**
+- **Decision:** Bump `LORA_R = 2 → 8` to quadruple the trainable subspace.
+- **Hypothesis:** If frozen Gemma's logit prior dominates, rank-2 perturbations may not have enough directional capacity to consistently flip argmax across secrets.
+- **Result:** **Failed.** Same pattern as r=2 — capacity was not the bottleneck.
+
+**5. Test B — Signal Density / Secret-Pool Size (Apr 18-19)**
+- **Decision:** Reduce `PROBE_VOCAB = 16 → 4` while keeping `PROBE_N_EVAL = 16`. Each population member now plays each secret ~4 times under CRN per iter (vs. ~1× before).
+- **Hypothesis:** The bottleneck is variance from secret sampling — per-member fitness is a 1-trial Bernoulli win-rate estimate dominated by which secret got drawn.
+- **Result:** **SUCCESS.** Greedy success climbed 0% → **86% peak / 66% final** over 20 iters (vs. +12pp before). `dprobe` peaks +25.0%, +28.1%, +15.6%. Mean turns 6.0 → 2.5. `popσ` 0.13 → 0.7.
+- **Footnote:** The probe verdict still printed `FAIL` because `cos(ĝ) ≈ 0`. In a 17M-parameter LoRA space, `cos(ĝ_t, ĝ_{t-1})` between two independent fitness-weighted noise vectors is the *null behavior*, not evidence of failure. **`cos(ĝ)` is a one-way indicator — positive proves signal, zero does not prove no-signal.**
+
+**6. The Diagnosis**
+The bottleneck across all six attempts was the **per-secret revisit count per ES iteration under CRN**. For the production curriculum:
+
+| Stage | Secret pool | Episodes/iter | Visits per secret per iter |
+|------:|------------:|--------------:|---------------------------:|
+| 1     | 16          | 16            | **1×**                     |
+| 2     | 32          | 16            | **0.5×**                   |
+| ...   | ...         | 16            | progressively worse        |
+| 8     | 1024        | 16            | **0.016×**                 |
+
+Every stage of the production curriculum was structurally in the "winners are lottery-ticket-secrets" regime. Warm-start was carrying all the gain, ES was a random walk on top.
+
+### Failed Attempts
+
+**1. Trusting `cos(ĝ)` as a two-way indicator (Apr 11-19)**
+- Spent ~6 hours of compute on three estimator/momentum/capacity variants because the verdict logic treated `cos(ĝ) ≈ 0` as evidence of failure rather than as the high-dim ES null behavior.
+- **Lesson:** The verdict logic will be revised to `eval_lift OR cos(ĝ)` before next week.
+
+**2. PGPE-lite + EMA-on (Apr 12-15)**
+- Phase C attempt #1 was implemented with the existing `EMA_BETA=0.9` still in place. The two interacted destructively: baseline-subtract gave the per-iter raw gradient stable magnitude, then EMA averaged it to zero anyway.
+- Should have done EMA-off and baseline-subtract together as one experiment, not in series.
+
+**3. LoRA r=8 capacity bump (Apr 17)**
+- Quadrupled trainable parameters with no measurable effect because the actual bottleneck (eval budget per secret) was upstream of representational capacity. ~2 hours of compute, zero information gain on the bottleneck. Did rule out capacity as the bottleneck, which is small consolation.
+
+### Code Changes
+- `src/es_wordle.py`:
+  - Added `baseline_subtract: bool = False` to both `es_gradient_estimate_wordle` and `train_es_wordle` signatures and docstrings
+  - Implemented baseline-subtract branch with antithetic-pair difference (when `antithetic=True`) and raw mean-centered fitness (when `antithetic=False`)
+- `notebooks/week12_implementation_LoRARun.ipynb`:
+  - Cell 4: added `BASELINE_SUBTRACT = True`, set `EMA_BETA = 0.0`, set `LORA_R = 8`, with paragraph-long comments explaining each diagnosis
+  - Cell 9 markdown: rewrote probe description to document the signal-density test (Test B)
+  - Cell 10 (probe): added `PROBE_VOCAB = 4`, threaded `baseline_subtract` into the probe ES call, added one-shot gradient-norm probe to auto-calibrate `PROBE_ALPHA` for whichever fitness shaping is active
+  - Cell 11 markdown: documented the EMA-cancels-uncorrelated-gradients failure mode
+  - Cell 12 (production run): threaded `baseline_subtract` into ALPHA-cal probe and `train_curriculum`
+  - Cell 2: added `baseline_subtract` to `inspect.signature(train_es_wordle)` check so a stale `es_wordle.py` import is caught at notebook startup
+- `scripts/run_es_signal_density_probe.py` (new): standalone CLI mirror of the probe cell so the signal-density test can be re-run without restarting the Jupyter kernel
+
+### Open Questions
+1. Does the full pipeline (warm-start + ES + diagnostics) at `VOCAB_SCHEDULE=[4]`, `N_ITERATIONS=30` produce measurable `es_gain > 0` on top of warm-start? (Next experiment.)
+2. If yes: does mini-batch ES (e.g. 8 secrets × 32 episodes per iter, sample subset under CRN) preserve `es_gain` at the production vocab=1024 stage?
+3. If no: is the LM logit prior so dominant that no head-only / rank-8 LoRA configuration can move argmax consistently across many secrets at once? Would per-turn dense shaping (yellow/green letter coverage, constraint consistency) help?
+
+### LLM Usage Log
+- **Claude (Apr 10-19):** All six debugging sessions — interpreting probe output, proposing variants, evaluating results, and the high-dim `cos(ĝ)` math; ~12 conversations, ~6 hours total.
+- **Cursor AI (Apr 12-19):** Edits to `src/es_wordle.py` (`baseline_subtract` branch), notebook cells (4, 9, 10, 11, 12), and the standalone CLI probe script; ~3 hours of small high-precision edits.
+- **ChatGPT (Apr 16):** Sanity check that EMA averages successive uncorrelated gradient vectors toward zero in expectation; ~20 min.
+
+See `docs/llm_exploration/week12_log.md` for the conversation-level account.
+
+---
+
+## Week 11 (April 3 - April 9, 2026)
+
+### Overview
+Scaled the Wordle ES pipeline from distilGPT-2 + 16-word vocab to **Gemma-3-1b-it + LoRA + 1024-word vocab** with a multi-stage curriculum. End-to-end pipeline runs cleanly; central scientific question (does ES contribute on top of warm-start?) deferred to Week 12.
+
+### Key Decisions
+
+**1. Backbone Swap: distilGPT-2 → Gemma-3-1b-it**
+- Switched to `google/gemma-3-1b-it` (instruction-tuned) so the policy could be prompted with the model's native chat template (`apply_chat_template`).
+- Frozen base model; only LoRA + linear head are trainable.
+
+**2. LoRA Wiring on a HuggingFace Causal LM**
+- Used `peft.LoraConfig(r=2, target_modules=["q_proj","k_proj","v_proj","o_proj"])` on Gemma's attention projections.
+- Verified `count_lora_parameters()` matches expectations (~17M total trainable LoRA params at r=8, ~4M at r=2) and that base weights stay frozen across an ES iteration.
+
+**3. Curriculum Design (`VOCAB_SCHEDULE`)**
+- 8 stages: `[16, 32, 64, 96, 128, 256, 512, 1024]`.
+- Each stage runs supervised warm-start (200–1600 episodes, scaling with vocab size) followed by ES (10–30 iters depending on stage).
+- Per-stage `quick_eval_success` before/after warm-start AND before/after ES, so per-stage `ws_gain` and `es_gain` are recorded separately.
+
+**4. Variance Reduction Suite**
+- `antithetic=True` — sample N/2 noise vectors and evaluate both `+ε` and `−ε`.
+- `common_random_numbers=True` — same secret draws and same env-RNG seed for every population member within an iteration.
+- `rank_fitness=True` — centered ranks instead of raw fitness.
+- `EMA_BETA=0.9` — Adam-like momentum on the raw gradient.
+- `win_fitness_scale=8.0` — bonus weight on win events in `win_plus_return` fitness so a single win in a population dominated by losses is visible.
+
+### Results
+
+**Pipeline mechanics:**
+- 8-stage curriculum runs end-to-end on a single A100 in ~5 hours.
+- Per-stage warm-start gains: 38–66pp greedy success on the training secret pool.
+- Per-stage ES gains: **~0pp.**
+
+**Honest assessment:**
+The pipeline is correct, instrumented, and reproducible. The scientific question (does ES contribute beyond warm-start?) is unresolved — every stage's `es_gain ≈ 0` could mean (a) ES doesn't help, (b) ES would help but the eval budget is too small to detect it, or (c) the warm-start is saturating the head and there's no headroom for ES. Week 12 isolates which.
+
+### Code Changes
+- `src/wordle_gpt2_policy.py`: extended to load arbitrary HuggingFace causal LMs (`AutoModelForCausalLM`), apply chat templates, and batch-forward via `forward_logits_batch`
+- `src/wordle_gpt2_warmstart.py`: added per-stage warm-start with `feedback_consistent_random=True` random pre-play and a post-WS success ceiling (skip WS if pool already at ≥0.85 greedy success)
+- `src/es_wordle.py`: added `train_curriculum` driver with per-stage warm-start + ES + diagnostics
+- `notebooks/week12_implementation_LoRARun.ipynb`: full pipeline notebook (named "week12" by file path; structurally the Week-11 deliverable)
+
+### Open Questions
+1. Is `es_gain ≈ 0` an artifact of the eval-budget design or a real "ES adds nothing" result?
+2. Does `cos(ĝ)` ever turn positive within an ES stage? (Need the Phase A probe to find out.)
+
+### LLM Usage Log
+- **Cursor AI:** LoRA wiring on Gemma, curriculum driver, per-stage diagnostics; ~10 hours
+- **Claude:** Per-stage diagnostic design (`ws_gain` vs `es_gain` separation), warm-start headroom ceiling rationale; ~3 hours
+
+---
+
+## Week 10 (March 23 - April 2, 2026)
+
+### Overview
+Graduated from GridWorld to **Wordle** as the next testbed for ES. Built a Gym-style Wordle environment, a linear-head policy on top of a frozen language model, and ran the first end-to-end ES + LM training loop on a 16-word vocabulary with distilGPT-2.
+
+### Key Decisions
+
+**1. Domain Selection: Wordle**
+- **Decision:** Pick Wordle as the bridge from GridWorld to LM-based RL.
+- **Rationale:** Sparse reward (only know if you won at the end), discrete action space (a vocabulary of valid 5-letter words), reward shaping is natural (per-turn green/yellow letter coverage), and the action space is small enough to handle as a categorical head rather than open-ended generation.
+- **Alternatives considered:** Math-token games (too dense), single-step QA (no multi-turn feedback structure), TextWorld (too unconstrained).
+
+**2. Environment Design**
+- `WordleEnvironmentWrapper` in `src/wordle_env.py`:
+  - Action format: `<guess>WORD</guess>` with optional `<think>...</think>` block ignored at scoring time
+  - Per-turn structured feedback (green/yellow/grey per letter)
+  - `set_target_pool(words)` so the curriculum can swap secret distribution without rebuilding
+  - Decoupled action vocabulary (what the policy can emit) from secret pool (what the env can pick) — this seam paid off heavily in Weeks 11/12
+- Initial pool: `MOCK_WORDLE_TARGETS` (16 words) for smoke test; hook to load full Prime Intellect 2300-word answer list later
+
+**3. Policy Architecture: Linear Head Over Frozen LM**
+- `WordleGPT2Policy` in `src/wordle_gpt2_policy.py`:
+  - Loads any HuggingFace causal LM (`AutoModel.from_pretrained`)
+  - Linear `head: nn.Linear(hidden_dim, vocab_size)` over a fixed superset action vocabulary
+  - **Previous-guess masking**: logits for already-guessed words set to `−∞` so the policy can't repeat itself
+  - `richer_prompt=True`: prepends a per-turn structured constraint summary ("letters known to be in word: A, R; positions known: _R___") so the LM has the deductive state
+  - `forward_logits_batch(states)` for batched forward across an ES population (critical for wall-clock when scaling to Gemma)
+- Action space is a **fixed superset** of all curriculum stages — head dim never changes, secret pool is what gets restricted
+
+**4. ES on Wordle: Carry the Week-7 Lessons Forward**
+- Added to `src/es_wordle.py`:
+  - `rank_fitness=True` (centered ranks robust to fitness ties)
+  - `fitness_objective="win_plus_return"` (mix sparse win-rate with dense partial-credit return)
+  - `win_fitness_scale=8.0` (bonus weight on win events)
+  - `antithetic=True` and `common_random_numbers=True` (variance reduction)
+- These four flags turned the initial "0% forever" run into a noisy "bouncing 0–12% on 16-word pool" run — clearly random, but no longer flat.
+
+**5. Calibrate `Step‖`, Not `α`**
+- Instrumented `param_drift`, `step_norm`, `grad_norm` per iter.
+- Added an in-cell ALPHA-calibration probe: run one ES gradient estimate at init, measure `‖ĝ‖`, back-solve for `α` to hit a target initial step `~0.13` (LoRA-friendly Adam-equivalent magnitude).
+- This abstraction made the `(σ, N, n_params)` knobs independently tunable without re-tuning LR.
+
+**6. Supervised Warm-Start**
+- `supervised_warm_start_wordle` in `src/wordle_gpt2_warmstart.py`:
+  - Pick a secret, simulate 1–4 random opening guesses, record the resulting state
+  - Cross-entropy loss between head logits and the secret's vocab index
+  - **Critical constraint:** never put the secret in the prompt — must be inferred from feedback
+  - `feedback_consistent_random=True`: random pre-play words constrained by accumulated feedback (so the supervised target is a sensible inference, not "predict random secret given garbage prefix")
+
+### Failed Attempts
+
+**1. Open-Vocabulary Generation**
+- **Attempt:** Let the LM `generate(...)` a 5-letter completion as the action.
+- **Result:** ~30% of guesses were not in the answer list, env rejected them, rollouts ended in 1–2 turns with no signal.
+- **Fix:** Switched to a categorical head over a fixed vocabulary the same day.
+
+**2. No Previous-Guess Masking**
+- **Attempt:** First ES run let the policy pick the same word every turn.
+- **Result:** Argmax stuck on first guess, every game lost in 6 identical turns.
+- **Fix:** Add `−∞` masking on previously-guessed action indices. 5 lines of code.
+
+**3. σ = 0.1 (carryover from GridWorld)**
+- **Attempt:** Re-used Week-7 default noise scale.
+- **Result:** Head exploded after 5 iters — `‖θ − θ₀‖ → 30+`, success collapsed to 0%.
+- **Fix:** Reverted to `σ = 0.02`. Cost ~3 hours of compute.
+
+**4. Standardization-Collapse on 16-Word Vocab**
+- **Attempt:** First ES run with vanilla `(fitness − mean) / std` shaping.
+- **Result:** Same Week-7 failure mode — sparse wins → near-zero population variance → near-zero ES update. 80 iterations, 0% success, every population member tied on fitness.
+- **Fix:** Switched to `rank_fitness=True` + `win_plus_return` + `win_fitness_scale=8`. (Foundation for Week 11/12.)
+
+### Initial Results
+
+**Pipeline (16-word vocab, distilGPT-2, no LoRA, no curriculum):**
+- Random init: 0% greedy success
+- After 50 warm-start steps: ~60% greedy success on training pool
+- After 30 ES iterations on top: ~62% greedy success
+- **ES contribution: roughly noise.** This is the question that defined Weeks 11 and 12.
+
+### Code Changes
+- `src/wordle_env.py` (new): Gym-style Wordle env with structured per-turn feedback and `set_target_pool` API
+- `src/wordle_gpt2_policy.py` (new): linear-head policy over a frozen HuggingFace LM with previous-guess masking and batched forward
+- `src/wordle_gpt2_warmstart.py` (new): supervised warm-start with feedback-consistent random pre-play
+- `src/es_wordle.py` (new): ES gradient estimator + training loop adapted for Wordle (rank-fitness, antithetic, CRN, win-plus-return shaping)
+- `notebooks/week10_implementation.ipynb` (new): smoke-test notebook for the 16-word vocab + distilGPT-2 pipeline
+
+### Open Questions Heading Into Week 11
+1. Does warm-start memorize the training secret pool, or generalize?
+2. With Gemma-3-1b instead of distilGPT-2, does the LM prior absorb so much of the policy that LoRA + ES updates can't move argmax?
+3. What does a multi-stage curriculum (vocab=16 → 32 → 64 → … → 1024) actually buy us, vs. one big stage at vocab=1024?
+
+### LLM Usage Log
+- **ChatGPT:** Domain selection (Wordle vs alternatives), diagnosis of "0% forever" failure mode, ~2 hours
+- **Claude:** Policy class design (linear head over LM hidden state), warm-start no-leak design, ~1 hour
+- **Cursor AI:** Wordle env, ES-on-Wordle module, hyperparameter sweep instrumentation, ~4 hours of pair programming
+
+See `docs/llm_exploration/week10_log.md` for the conversation-level account.
+
+---
+
 ## Week 7 (Feb 17 - Feb 24, 2026)
 
 ### Overview
@@ -458,4 +701,4 @@ g- Notebook validation & testing: 4 hours
 
 ---
 
-*Log updated: February 26, 2026*
+*Log updated: April 19, 2026*

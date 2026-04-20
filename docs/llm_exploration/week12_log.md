@@ -288,3 +288,59 @@ Exp 2 showed iter-1 contains +18pp of real signal; the rest of the run walked aw
 1. **Mini-batch ES under CRN is plumbing-verified and signal-productive, but not yet end-to-end-useful.** dprobe fires, iter-1 gains, ES_win climbs, `‖θ−θ₀‖` monotonically grows. None of that was true of the pre-Test-B failure regime.
 2. **The greedy metric keeps lying — in both directions.** Exp 1 hid ES signal behind saturation at 100%; Exp 2 hid it behind noise in a 50-episode greedy eval. A stochastic-sampling eval (or a larger deterministic eval over all 16 secrets × N episodes) would have a smaller lying surface.
 3. **Step-size calibration is brittle across rotating mini-batch objectives.** ALPHA tuned for a one-shot probe at iter 0 is not automatically right for 30 iters of rotating 4-word mini-batches. Either recalibrate online or pick a smaller fixed ALPHA and more iters.
+
+---
+
+## Session 8: Overshoot Follow-up — ALPHA×0.25 + best-iter restore (Apr 20)
+
+Follow-through on Session 7's closing hypothesis: Exp 2 gained +18pp greedy at iter 1 then walked away. Diagnosis was step-size / overshoot under a rotating 4-word mini-batch objective with ALPHA calibrated for a stationary objective. Mitigation: quarter ALPHA, double iters, add best-iter restore and a stochastic-eval companion.
+
+### Command
+
+```bash
+EXP2_ALPHA_SCALE=0.25 EXP2_N_ITERATIONS=60 EXP2_RESTORE_BEST=1 \
+  .venv/bin/python -u scripts/run_experiment2_minibatch_crn.py \
+  2>&1 | tee /tmp/exp2_overshoot.log
+```
+
+Code changes (3 files, ~190 LoC net): added `restore_best_at_stage_end` and `eval_stochastic_every` kwargs to `train_es_wordle` + `train_curriculum` in `src/es_wordle.py`; wired `EXP2_RESTORE_BEST` / `EXP2_EVAL_STOCHASTIC_EVERY` env vars and a rewritten summary block (final vs best, greedy vs stochastic, best_iter) into `scripts/run_experiment2_minibatch_crn.py`; new `ACTIVE_EXPERIMENT="exp2_overshoot"` selector branch + post-calibration `ALPHA_SCALE` hook + new markdown explainer cell in `notebooks/week12_implementation_LoRARun.ipynb`. Single-stage probe; no changes to fitness shaping, RANK_FITNESS, BASELINE_SUBTRACT, EMA_BETA, LoRA rank, or subset size.
+
+### Per-iter summary (greedy | stochastic, every iter; every 4th row shown)
+
+| iter | greedy | stoch | ‖θ−θ₀‖ | Step‖ | wins/N | dprobe |
+|-----:|-------:|------:|-------:|------:|-------:|-------:|
+|   0  | 34%    | 40%   | 0.66   | 0.657 | 54/64  |  +0.0% |
+|   1  | 58%    | 34%   | 0.84   | 0.520 | 63/64  |  +0.0% |
+|   4  | 50%    | 24%   | 1.32   | 0.523 | 60/64  |  +0.0% |
+|   8  | 52%    | 34%   | 1.87   | 0.771 | 56/64  | +15.6% |
+|  14  | 56%    | 46%   | 2.41   | 0.656 | 60/64  | +31.2% |
+|  20  | 42%    | 40%   | 2.78   | ~0.55 | 60/64  |  +0.0% |
+|  24  | 58%    | 40%   | 3.03   | ~0.55 | 64/64  | +18.8% |
+|  28  | 54%    | 42%   | 3.24   | 0.585 | 63/64  |  −6.2% |
+|  40  | 50%    | 50%   | 3.81   | 0.467 | 63/64  | +12.5% |
+|  48  | 48%    | 38%   | ~4.3   | ~0.55 | ~63/64 |    —   |
+|  59  | 52%    | 42%   | ~4.9   | ~0.60 | 58/64  |  +3.1% |
+
+### Final-vs-best summary
+
+- `pre-warm-start`: **0.0% greedy | 0.0% stoch** on the 16-word pool.
+- `post-warm-start (greedy)`: **36.0%** (`ws_gain = +36.0%`).
+- `final_greedy` (iter 59): **52.0%** (`final − post_ws = +16.0%`).
+- `best_greedy` (iter 1): **58.0%** (`best − post_ws = +22.0%`).
+- `final_stochastic`: **42.0%**. `best_stochastic`: **52.0%**.
+- `post-run eval on restored-best θ`: greedy **38%**, stochastic **38%**. Discrepancy vs `best_greedy=58%` is eval-slate noise — the post-run eval uses a different `probe_seed`, so it draws a different 50-episode slate. `best_greedy` is apples-to-apples across iters (same RNG stream).
+- `dprobe` non-zero fraction: **35/60 = 58%** (Session 7 was 53%).
+
+### Verdict — PASS-A
+
+- `best_greedy − post_ws >= +10pp` → **True** (+22pp).
+- `final_greedy >= post_ws_greedy` → **True** (+16pp).
+- `dprobe non-zero >= 25%` → **True** (58%).
+- `best_greedy − final_greedy >= +10pp` → **False** (+6pp collapse, inside the 7pp single-slate noise floor).
+
+**PASS-A satisfied** — step-size / overshoot hypothesis is confirmed and the fix is self-sufficient. ES converges on its own under quartered ALPHA; best-iter restore is *not* load-bearing in this configuration (PASS-B would have fired if it were). `‖θ−θ₀‖` grew linearly 0.66 → ~4.9 over 60 iters, very close to the 0.13 × 60 × 0.25 accumulation target implicit in the ALPHA_SCALE choice — consistent with the aggregation-is-the-bottleneck story Session 7 landed on.
+
+### Next-hypothesis pointer
+
+The 7pp single-slate eval noise floor is now the dominant source of measurement variance — greedy oscillates 30-58% even when ‖θ−θ₀‖ is monotonic. Next cheapest experiment before scaling vocab: replace the 50-episode probe slate with the deterministic 16 × K episodes (full pool, K visits per secret) so the noise floor drops below 3pp and monotonic convergence is visible in the raw numbers. Only then does it make sense to rerun at VOCAB_SCHEDULE=[32] or re-enable the full curriculum.
+

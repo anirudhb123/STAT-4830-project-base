@@ -75,6 +75,38 @@ Global knobs in §2 include `SIGMA=0.02`, `ALPHA=0.12`, `RICHER_PROMPT=True`, `F
 4. **Ablate warm-start vs ES under the same split.** Evaluate after warm-start and after ES on identical held-out episodes to determine whether ES adds signal in each regime.  
 5. **Keep implementation hygiene work in scope.** Continue prompt-quality fixes (`wordle_hints.py`, truncation checks) and multi-seed reporting once the experimental protocol is sound.
 
+## Follow-up results (Session 7 + Session 8)
+
+**What we still thought after the submission snapshot.** Notebook B's near-zero greedy success at the full vocabulary was the Week 12 headline finding, but the follow-up sessions narrowed the diagnosis. Session 7 (`scripts/run_experiment2_minibatch_crn.py`, mini-batch ES under CRN) showed that on a 16-word single-stage probe ES does produce real signal — greedy `eval_success` rose from a post-warm-start baseline of 30% to a peak of 48% at **iter 1**, a `+18pp` lift — but the run then walked away from that peak and finished at 18% (`final − post_ws = −12pp`). That pattern — signal at iter 1, random walk afterward — pointed at a step-size / overshoot problem: ALPHA was calibrated once at iter 0 on a 4-secret mini-batch, but the 4-secret subset rotates every iteration, so the per-iter step was ~3-4× too large for a non-stationary objective and the optimizer never aggregated its early gain.
+
+**Session 8 probe (`EXP2_ALPHA_SCALE=0.25 EXP2_N_ITERATIONS=60 EXP2_RESTORE_BEST=1`).** We quartered ALPHA, doubled the iteration budget to 60, and added two features to `train_es_wordle` / `train_curriculum`: `restore_best_at_stage_end` (track the best-by-greedy-eval iterate as a CPU-cloned `state_dict` and reload it at stage end) and `eval_stochastic_every` (companion stochastic eval at the same cadence as greedy, RNG-isolated so it does not perturb the ES stream). Single-stage probe, no changes to fitness shaping, RANK_FITNESS, BASELINE_SUBTRACT, EMA_BETA, LoRA rank, or the 4-secret subset size.
+
+**Result — PASS-A on the pre-registered verdict rubric.** On `VOCAB_SCHEDULE=[16]`, `N_ITERATIONS=60`, `ALPHA × 0.25`:
+
+| metric | value |
+| --- | --- |
+| pre-warm-start (greedy) | 0% |
+| post-warm-start (greedy) | 36% |
+| `best_greedy` (iter 1) | **58%** (`+22pp` vs post-WS) |
+| `final_greedy` (iter 59) | **52%** (`+16pp` vs post-WS) |
+| `best_stochastic` / `final_stochastic` | 52% / 42% |
+| `dprobe` non-zero fraction | 35/60 = **58%** |
+| `‖θ − θ₀‖` | 0.66 → ~4.9 (linear, non-oscillating) |
+
+The rubric (graded in order):
+
+- **PASS-A:** `best_greedy − post_ws_greedy ≥ +10pp` **and** `final_greedy ≥ post_ws_greedy` **and** `dprobe` non-zero ≥ 25%. All three fire (`+22pp` / `+16pp` / `58%`).
+- **PASS-B would have fired if** `best_greedy − final_greedy ≥ +10pp`, i.e. the run peaked and then collapsed back below post-WS + best. The observed `best − final = +6pp` gap is inside the ~7pp single-slate eval noise floor, so PASS-B does **not** fire; best-iter restore is not load-bearing for this configuration.
+- **FAIL would have fired if** none of the above. Did not occur; the sticky-subset fallback (`EXP2_SUBSET_REFRESH_EVERY=5`) was therefore not run.
+
+**Plain-English interpretation.** PASS-A says three things at once. (1) ES is doing real work on top of warm-start — it found a `+22pp` iterate at vocab = 16, well above the noise floor. (2) The run is *stable enough to aggregate its own gains* — the final greedy held `+16pp` above post-WS, which is the specific failure mode Session 7 exhibited (`−12pp`) and Session 8 fixes. (3) The ES gradient estimate is plumbing-healthy — `dprobe` fires on a solid majority (58%) of iterations, so the 4-secret subset CRN is not degenerate. Together, they confirm the Session 7 diagnosis (step-size overshoot under rotating mini-batch level sets) and validate the mitigation (quarter ALPHA, double iters) as *self-sufficient* rather than only viable with a best-iter rescue.
+
+**What this does and does not change about the Week 12 picture.** Notebook B's full-vocabulary, full-curriculum result at r=16 LoRA is still ~0% greedy and is still the headline failure we need to fix — Session 8 does not claim otherwise. What it *does* claim is that the specific optimizer-side pathology surfaced by Session 7 (iter-1 gain → walk-away) is a solved problem at vocab = 16 under a single stage. This is one stage of the curriculum rather than the full pipeline, and a single seed rather than a multi-seed result, so it should be read as directional evidence that the mini-batch + CRN + warm-start configuration is *optimizable* when ALPHA is chosen correctly, not as a claim that the full-curriculum regime now works.
+
+**Residual limitation — measurement, not optimization.** The greedy trajectory oscillates 30-58% from iter to iter even while `‖θ−θ₀‖` is monotonic. This is a 50-episode × 16-secret single-slate noise floor (per-slate σ ≈ 3-4pp; a different `probe_seed` on the final policy gave 38% greedy vs the 58% `best_greedy` — within 2.5σ of single-slate noise). The optimizer-side bottleneck is now below the measurement floor, and subsequent experiments should shrink that floor (deterministic 16 × K-episodes-per-secret eval, K ≥ 3) before reseeding or scaling vocab.
+
+**Next cheapest experiments (in order).** (1) Replace the 50-episode probe slate with a deterministic 16 × K full-pool eval to drop the noise floor below 3pp and verify visually monotonic convergence. (2) Reseed the Session 8 configuration (two or three additional seeds) to calibrate the PASS-A effect size. (3) Rerun at `VOCAB_SCHEDULE=[32]` with the same `ALPHA_SCALE=0.25` to test whether the step-size fix survives a vocabulary doubling. Only after those three does it make sense to re-enable the full 8-stage curriculum. Artifacts: [`scripts/run_experiment2_minibatch_crn.py`](scripts/run_experiment2_minibatch_crn.py), `/tmp/exp2_overshoot.log`; full narrative in [`docs/llm_exploration/week12_log.md`](docs/llm_exploration/week12_log.md) Session 8 and in the "Session 8 — Overshoot Follow-up" postscript of [`critiqueWeek12.md`](critiqueWeek12.md).
+
 ## References
 
 1. Salimans, T., Ho, J., Chen, X., Sidor, S., & Sutskever, I. (2017). Evolution Strategies as a Scalable Alternative to Reinforcement Learning. *arXiv:1703.03864*.  

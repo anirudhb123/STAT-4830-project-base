@@ -21,10 +21,41 @@ Usage (from repo root):
     .venv/bin/python -u scripts/run_experiment2_minibatch_crn.py 2>&1 | \
         tee /tmp/exp2_full.log
 
-Environment overrides (for smoke tests):
+Environment overrides (for smoke tests and the pool-size sweep):
     EXP2_N_ITERATIONS=2          # number of ES iters
     EXP2_WARM_START_STEPS=200    # per-stage warm-start episode budget
     EXP2_SUBSET_SIZE=4           # k for per_iter_secret_subset_size
+    EXP2_ALPHA_SCALE=1.0         # post-calibration multiplier on ALPHA
+                                 #   (use 0.25 to quarter ALPHA for the
+                                 #   rotating-subset overshoot regime
+                                 #   documented in critiqueWeek12.md)
+    EXP2_N_CAL_PROBES=1          # number of rotated-subset calibration probes.
+                                 #   >1 draws N fresh subsets and uses the
+                                 #   median ‖ĝ‖ to calibrate ALPHA, which is
+                                 #   the "online recalibration" option (a)
+                                 #   from the Week-12 critique postscript.
+                                 #   Default 1 reproduces the single-shot
+                                 #   iter-0 calibration (stationary-objective
+                                 #   assumption).
+    EXP2_RESTORE_BEST=1          # 1 = restore best-iter policy on finish
+                                 #   (so end_greedy / end_stoch measure the
+                                 #   peak policy, not the final iterate).
+                                 #   Set 0 to keep the final iterate (legacy).
+    EXP2_VOCAB_SIZE=16           # size of the single-stage secret pool
+                                 #   (was hardcoded to 16). Intended for
+                                 #   the "pool size sweep" experiment that
+                                 #   characterizes where the task becomes
+                                 #   intractable as the secret pool grows.
+                                 #   Run repeatedly at different values
+                                 #   (e.g. 16, 32, 64, 128) with everything
+                                 #   else held constant to produce comparable
+                                 #   data points. Note: this is the SECRET
+                                 #   POOL, not the action head width — the
+                                 #   head is still MAX_VOCAB=1024 regardless,
+                                 #   so policy.words is the same across runs
+                                 #   and the only thing that changes is which
+                                 #   words the env can pick as the hidden
+                                 #   answer. Assertion enforces <= MAX_VOCAB.
 """
 from __future__ import annotations
 
@@ -208,7 +239,17 @@ def main() -> None:
     WARM_START_FEEDBACK_CONSISTENT = True
 
     # === ACTIVE_EXPERIMENT = 'exp2' ===
-    VOCAB_SCHEDULE = [16]
+    # Single-stage secret pool size. Default 16 reproduces the original
+    # Exp 2 design. Override EXP2_VOCAB_SIZE to sweep (e.g. 32, 64, 128)
+    # and produce comparable data points characterizing the pool-size ->
+    # accuracy curve. Multi-stage sweeps are deliberately not supported
+    # here; run the script multiple times so each run has its own ALPHA
+    # calibration, warm-start, and best-iter snapshot — that's what makes
+    # the data points comparable.
+    VOCAB_SIZE = int(os.environ.get("EXP2_VOCAB_SIZE", "16"))
+    if VOCAB_SIZE < 1:
+        raise ValueError(f"EXP2_VOCAB_SIZE must be >= 1, got {VOCAB_SIZE}.")
+    VOCAB_SCHEDULE = [VOCAB_SIZE]
     N_ITERATIONS = int(os.environ.get("EXP2_N_ITERATIONS", "30"))
     HOLDOUT_MODE = "episode"
     SECRET_HOLDOUT_FRAC = 0.2  # ignored in episode mode
@@ -216,6 +257,12 @@ def main() -> None:
     # Keep action head wide (1024) so the mock-targets assertion holds and
     # the geometry matches gemma_full's stage-1 setup (wide head, narrow pool).
     MAX_VOCAB = 1024
+    if VOCAB_SIZE > MAX_VOCAB:
+        raise ValueError(
+            f"EXP2_VOCAB_SIZE={VOCAB_SIZE} exceeds the action head width "
+            f"MAX_VOCAB={MAX_VOCAB}. Either raise MAX_VOCAB or lower "
+            f"EXP2_VOCAB_SIZE."
+        )
 
     SECRET_POOL_SIZES = list(VOCAB_SCHEDULE)
     EVAL_POOL_SIZES = [0 for _ in SECRET_POOL_SIZES]
@@ -244,6 +291,45 @@ def main() -> None:
         f"baseline_subtract={BASELINE_SUBTRACT} ema_beta={EMA_BETA} ==="
     )
     print(f"WARM_START_STEPS_PER_STAGE = {WARM_START_STEPS_PER_STAGE}")
+
+    # Signal-density headline: visits/secret/iter under CRN. The week-12
+    # probe showed ES only produces a learnable signal when this is >= ~4
+    # (Test B). Because `per_iter_secret_subset_size` pins the per-iter
+    # secret count to `PER_ITER_SECRET_SUBSET_SIZE` regardless of global
+    # pool size, the ratio below is independent of VOCAB_SIZE — which is
+    # exactly the point of the sweep: you can bump VOCAB_SIZE and *not*
+    # slide into the lottery regime. What does change with pool size is
+    # (a) how much the objective rotates between iters (larger pool =
+    # more distinct subsets to cycle through) and (b) how hard end-of-run
+    # greedy eval on the full pool is.
+    _visits_per_secret_per_iter = N_EVAL_EPISODES / max(1, PER_ITER_SECRET_SUBSET_SIZE)
+    _n_distinct_subsets = max(1, VOCAB_SIZE // max(1, PER_ITER_SECRET_SUBSET_SIZE))
+    print(
+        f"[signal density] visits/secret/iter = {_visits_per_secret_per_iter:.1f} "
+        f"(n_eval={N_EVAL_EPISODES} / subset_size={PER_ITER_SECRET_SUBSET_SIZE}); "
+        f"~{_n_distinct_subsets} distinct subsets to rotate through at VOCAB_SIZE={VOCAB_SIZE}."
+    )
+    if _visits_per_secret_per_iter < 2.0:
+        print(
+            "[signal density] WARNING: visits/secret/iter < 2 — this is the "
+            "lottery regime the week-12 probe identified. Consider raising "
+            "EXP2_SUBSET_SIZE's n_eval ratio before interpreting any result "
+            "from this run as a property of the pool size."
+        )
+    # Rule-of-thumb warm-start scaling: the default 200 was calibrated at
+    # VOCAB_SIZE=16. At larger pool sizes the CE task has more classes, so
+    # 200 episodes is often too short and post-WS success looks artificially
+    # low (which then looks like "the policy can't learn this vocab" but is
+    # really "CE didn't have enough data"). Print a note but don't auto-scale
+    # — the user may be deliberately holding WS constant to isolate the
+    # post-WS / ES contribution at each pool size.
+    if VOCAB_SIZE > 32 and WARM_START_STEPS_PER_STAGE[0] <= 200:
+        print(
+            f"[warm-start] NOTE: EXP2_WARM_START_STEPS={WARM_START_STEPS_PER_STAGE[0]} "
+            f"at VOCAB_SIZE={VOCAB_SIZE} may be short; at vocab=128 a ~4x budget "
+            f"(~800) is a reasonable first try if post-WS looks poor. Holding it "
+            f"constant is fine for a controlled sweep — just know it's a factor."
+        )
 
     random.seed(SEED)
     np.random.seed(SEED)
@@ -307,50 +393,78 @@ def main() -> None:
         f"greedy={pre_ws_greedy:.1%}  stochastic={pre_ws_stoch:.1%}"
     )
 
-    # --- ALPHA calibration: one-shot gradient probe on the full stage pool ----
+    # --- ALPHA calibration: probe gradient norm(s) on the full stage pool ----
     # We calibrate on the FULL pool (not a 4-word subset) so ALPHA reflects the
     # scale of gradient norms ES will see once per_iter_secret_subset_size is
     # in effect. Within-iter, each call to es_gradient_estimate_wordle with
     # subset_size=4 gets a gradient over 4 secrets; the norm scales weakly
     # with pool composition, so a full-pool calibration is a reasonable proxy
     # (and matches cell 12's calibration-before-curriculum design).
+    #
+    # With ``EXP2_N_CAL_PROBES > 1`` we run the probe multiple times with fresh
+    # subset draws per probe and take the *median* ‖ĝ‖. This is the "online
+    # recalibration against the expected gradient magnitude across several
+    # rotated subsets" option (a) from critiqueWeek12.md's postscript:
+    # a one-shot iter-0 calibration implicitly assumes a stationary objective,
+    # but with rotating mini-batches the per-iter gradient magnitude varies
+    # across subsets, and the iter-0 draw can be systematically low or high.
+    # Median over K probes is robust to that variation and costs
+    # (K-1) * (N_POP * N_EVAL_EPISODES) extra rollouts, all done once before
+    # training starts.
     PROBE_TARGET_STEP = 0.13
-    cal_seed = SEED + 2
-    snap = _snapshot_and_reseed(cal_seed)
-    try:
-        _g, _af, _fits, _aw, _ps, _wrs = es_gradient_estimate_wordle(
-            policy,
-            env_train,
-            N=N_POP,
-            sigma=SIGMA,
-            n_eval_episodes=N_EVAL_EPISODES,
-            max_turns=6,
-            rank_fitness=RANK_FITNESS,
-            fitness_objective=FITNESS_OBJECTIVE,
-            win_fitness_scale=WIN_FITNESS_SCALE,
-            antithetic=ANTITHETIC,
-            common_random_numbers=COMMON_RANDOM_NUMBERS,
-            baseline_subtract=BASELINE_SUBTRACT,
-            per_iter_secret_subset_size=PER_ITER_SECRET_SUBSET_SIZE,
-        )
-        _g_norm = float(_g.norm().item())
-    finally:
-        _restore_snapshot(snap)
-        del _g, _af, _fits, _aw, _ps, _wrs
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+    N_CAL_PROBES = max(1, int(os.environ.get("EXP2_N_CAL_PROBES", "1")))
+    probe_norms: list[float] = []
+    for probe_idx in range(N_CAL_PROBES):
+        cal_seed = SEED + 2 + probe_idx
+        snap = _snapshot_and_reseed(cal_seed)
+        try:
+            _g, _af, _fits, _aw, _ps, _wrs = es_gradient_estimate_wordle(
+                policy,
+                env_train,
+                N=N_POP,
+                sigma=SIGMA,
+                n_eval_episodes=N_EVAL_EPISODES,
+                max_turns=6,
+                rank_fitness=RANK_FITNESS,
+                fitness_objective=FITNESS_OBJECTIVE,
+                win_fitness_scale=WIN_FITNESS_SCALE,
+                antithetic=ANTITHETIC,
+                common_random_numbers=COMMON_RANDOM_NUMBERS,
+                baseline_subtract=BASELINE_SUBTRACT,
+                per_iter_secret_subset_size=PER_ITER_SECRET_SUBSET_SIZE,
+            )
+            probe_norms.append(float(_g.norm().item()))
+        finally:
+            _restore_snapshot(snap)
+            del _g, _af, _fits, _aw, _ps, _wrs
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    # Median is more robust than mean across subset draws (a single
+    # all-losers subset can drive ‖ĝ‖ close to 0, and a single all-winners
+    # subset can spike it; neither represents the typical iter).
+    sorted_norms = sorted(probe_norms)
+    mid = len(sorted_norms) // 2
+    if len(sorted_norms) % 2 == 1:
+        _g_norm = sorted_norms[mid]
+    else:
+        _g_norm = 0.5 * (sorted_norms[mid - 1] + sorted_norms[mid])
 
     if _g_norm > 1e-8:
         ALPHA = float(PROBE_TARGET_STEP / _g_norm)
+        probe_summary = (
+            f"probes={probe_norms}" if N_CAL_PROBES > 1 else f"‖ĝ‖={_g_norm:.4g}"
+        )
         print(
-            f"[ALPHA cal] raw ‖ĝ‖ = {_g_norm:.4g} -> "
+            f"[ALPHA cal] {probe_summary} -> median ‖ĝ‖ = {_g_norm:.4g} -> "
             f"ALPHA = {ALPHA:.2e} (target step ≈ {PROBE_TARGET_STEP})"
         )
     else:
         ALPHA = 1e-5
         print(
-            f"[ALPHA cal] ‖ĝ‖ ≈ 0; falling back to ALPHA={ALPHA:.2e}"
+            f"[ALPHA cal] median ‖ĝ‖ across {N_CAL_PROBES} probes ≈ 0; "
+            f"falling back to ALPHA={ALPHA:.2e}"
         )
 
     # Optional post-calibration scale for the step-size/overshoot diagnostic.
@@ -366,6 +480,20 @@ def main() -> None:
             f"[ALPHA cal] post-calibration scale EXP2_ALPHA_SCALE={alpha_scale} -> "
             f"ALPHA = {ALPHA:.2e}"
         )
+
+    # Best-iter checkpointing (week-12 postscript risk (c): greedy success on
+    # small pools can peak early and drift down under rotating mini-batches;
+    # without restoration the reported end_greedy / end_stoch reflect the
+    # *final* iter, not the peak). EXP2_RESTORE_BEST=1 (default) restores the
+    # peak flat-param snapshot before end-of-run eval so the summary numbers
+    # measure the best policy we actually produced, not whatever the last
+    # rotating subset drifted to. Set to 0 for the legacy "final iterate"
+    # behavior when debugging late-iter dynamics.
+    RESTORE_BEST_ON_FINISH = bool(int(os.environ.get("EXP2_RESTORE_BEST", "1")))
+    print(
+        f"[best-iter] track_best_iter=True, "
+        f"restore_best_on_finish={RESTORE_BEST_ON_FINISH}"
+    )
 
     history = train_curriculum(
         policy,
@@ -408,6 +536,8 @@ def main() -> None:
         ema_beta=EMA_BETA,
         baseline_subtract=BASELINE_SUBTRACT,
         per_iter_secret_subset_size=PER_ITER_SECRET_SUBSET_SIZE,
+        track_best_iter=True,
+        restore_best_on_finish=RESTORE_BEST_ON_FINISH,
     )
 
     # --- Explicit post-run stochastic eval on the full 16-word pool ------------
@@ -483,6 +613,26 @@ def main() -> None:
     if eval_succs:
         peak_es = max(eval_succs)
         print(f"    peak eval_success (any iter): {peak_es:.1%}")
+
+    # Best-iter checkpointing: report the (iter, peak_eval_success) pair that
+    # `train_curriculum` emitted per stage. For Exp 2's single-stage run this
+    # is a 1-element list. The peak here matches `peak_es` above by
+    # construction, but the iter index tells us *when* it was hit — critical
+    # for interpreting the "peaks early, drifts late" pattern from the
+    # week-12 postscript.
+    stage_best_iters = list(history.get("stage_best_iter", []))
+    stage_best_succs = list(history.get("stage_best_eval_success", []))
+    if stage_best_iters and stage_best_succs:
+        bi = stage_best_iters[-1]
+        bs = stage_best_succs[-1]
+        bi_str = "n/a" if bi < 0 else str(bi)
+        bs_str = "n/a" if bs != bs else f"{bs:.1%}"
+        print(f"    best-iter checkpoint         : iter={bi_str}, eval={bs_str}")
+        if RESTORE_BEST_ON_FINISH:
+            print(
+                "    (policy was restored to the best-iter snapshot before "
+                "end-of-run eval below)"
+            )
 
     print("  [STOCHASTIC, full 16-word pool, temp-1 sampling]")
     print(f"    pre-warm-start success      : {pre_ws_stoch:.1%}")

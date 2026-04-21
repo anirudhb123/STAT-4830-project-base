@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import inspect
 import re
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Set
 
 import numpy as np
 import torch
@@ -172,6 +172,7 @@ class WordleGPT2Policy(nn.Module):
         use_chat_template: Optional[bool] = None,
         chat_generation_prompt: bool = True,
         use_lora: bool = False,
+        action_granularity: str = "char",
         lora_r: int = 4,
         lora_alpha: float = 16.0,
         lora_target_modules: Optional[List[str]] = None,
@@ -243,9 +244,165 @@ class WordleGPT2Policy(nn.Module):
         self.head = nn.Linear(hidden, self.action_dim)
         self.max_prompt_length = max_prompt_length
         self._model_name = model_name
+        self.action_granularity = action_granularity.lower().strip()
+        if self.action_granularity not in {"word", "char"}:
+            raise ValueError(
+                f"action_granularity must be 'word' or 'char', got {action_granularity!r}."
+            )
 
         nn.init.orthogonal_(self.head.weight, gain=0.01)
         nn.init.zeros_(self.head.bias)
+        self.char_head = nn.Linear(hidden, 26)
+        nn.init.orthogonal_(self.char_head.weight, gain=0.01)
+        nn.init.zeros_(self.char_head.bias)
+
+    @staticmethod
+    def _letter_to_idx(letter: str) -> int:
+        return ord(letter) - ord("A")
+
+    @staticmethod
+    def _idx_to_letter(idx: int) -> str:
+        return chr(ord("A") + idx)
+
+    def _feedback_constraints(self, state: WordleState) -> Dict[str, Any]:
+        fixed: Dict[int, str] = {}
+        blocked_pos: Dict[int, Set[str]] = {i: set() for i in range(5)}
+        required: Set[str] = set()
+        seen_non_gray: Set[str] = set()
+        gray_only: Set[str] = set()
+        for guess, feedback in zip(state.previous_guesses, state.feedback_history):
+            parts = feedback.split()
+            if len(parts) != 5:
+                continue
+            for i, part in enumerate(parts):
+                if ":" not in part:
+                    continue
+                letter, color = part.split(":", 1)
+                letter = letter.upper()
+                color = color.upper()
+                if len(letter) != 1 or not letter.isalpha():
+                    continue
+                if color == "GREEN":
+                    fixed[i] = letter
+                    required.add(letter)
+                    seen_non_gray.add(letter)
+                elif color == "YELLOW":
+                    blocked_pos[i].add(letter)
+                    required.add(letter)
+                    seen_non_gray.add(letter)
+                elif color == "GRAY":
+                    gray_only.add(letter)
+        banned_global = {c for c in gray_only if c not in seen_non_gray}
+        return {
+            "fixed": fixed,
+            "blocked_pos": blocked_pos,
+            "required": required,
+            "banned_global": banned_global,
+        }
+
+    def _char_logits_for_partial(self, state: WordleState, partial: str) -> torch.Tensor:
+        """Get next-letter logits conditioned on state and current partial guess."""
+        text = _build_wordle_prompt(state, richer_prompt=self.richer_prompt)
+        text += (
+            f"\nCurrent guess prefix: {partial if partial else '(empty)'}"
+            "\nPredict the next uppercase letter:"
+        )
+        if self.use_chat_template:
+            if not hasattr(self.tokenizer, "apply_chat_template"):
+                raise RuntimeError(
+                    f"Tokenizer for {self._model_name!r} does not expose apply_chat_template()."
+                )
+            messages = [{"role": "user", "content": [{"type": "text", "text": text}]}]
+            enc = self.tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=self.chat_generation_prompt,
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt",
+                truncation=True,
+                max_length=self.max_prompt_length,
+                padding="max_length",
+            )
+        else:
+            enc = self.tokenizer(
+                text,
+                return_tensors="pt",
+                truncation=True,
+                max_length=self.max_prompt_length,
+                padding="max_length",
+            )
+        model_inputs = _filter_model_inputs(dict(enc), self._lm_forward_keys)
+        model_inputs = {k: v.to(self.head.weight.device) for k, v in model_inputs.items()}
+        attn = model_inputs.get("attention_mask")
+        if self._lm_trainable:
+            out = self.lm(**model_inputs, output_hidden_states=True, return_dict=True)
+        else:
+            with torch.no_grad():
+                out = self.lm(**model_inputs, output_hidden_states=True, return_dict=True)
+        last_hidden_state = _extract_last_hidden_state(out)
+        if attn is not None:
+            idx = _last_non_padding_index(attn)[0]
+            h = last_hidden_state[0, idx]
+        else:
+            h = last_hidden_state[0, -1]
+        h = h.to(self.char_head.weight.dtype)
+        return self.char_head(h)
+
+    def _sample_autoregressive_word(
+        self,
+        state: WordleState,
+        deterministic: bool = False,
+    ) -> Tuple[str, torch.Tensor, torch.Tensor]:
+        constraints = self._feedback_constraints(state)
+        letters: List[str] = []
+        log_probs: List[torch.Tensor] = []
+        entropies: List[torch.Tensor] = []
+        for pos in range(5):
+            logits = self._char_logits_for_partial(state, "".join(letters)).clone()
+            # Hard position constraints from prior Wordle feedback.
+            fixed = constraints["fixed"].get(pos)
+            if fixed is not None:
+                forced_idx = self._letter_to_idx(fixed)
+                mask = torch.full_like(logits, float("-inf"))
+                mask[forced_idx] = 0.0
+                logits = logits + mask
+            else:
+                for blocked in constraints["blocked_pos"][pos]:
+                    logits[self._letter_to_idx(blocked)] = float("-inf")
+                for banned in constraints["banned_global"]:
+                    logits[self._letter_to_idx(banned)] = float("-inf")
+            probs = F.softmax(logits, dim=-1)
+            dist = torch.distributions.Categorical(probs)
+            if deterministic:
+                idx = int(torch.argmax(probs).item())
+                lp = torch.log(probs[idx] + 1e-12)
+                ent = torch.zeros((), device=probs.device, dtype=probs.dtype)
+            else:
+                a = dist.sample()
+                idx = int(a.item())
+                lp = dist.log_prob(a)
+                ent = dist.entropy()
+            letters.append(self._idx_to_letter(idx))
+            log_probs.append(lp)
+            entropies.append(ent)
+        word = "".join(letters)
+        if constraints["required"]:
+            for req in constraints["required"]:
+                if req not in word:
+                    missing_idx = self._letter_to_idx(req)
+                    # Replace earliest non-fixed spot to satisfy yellow/green evidence.
+                    for i in range(5):
+                        if constraints["fixed"].get(i) is None:
+                            letters[i] = self._idx_to_letter(missing_idx)
+                            break
+                    word = "".join(letters)
+                    if req in word:
+                        break
+        return word, torch.stack(log_probs).sum(), torch.stack(entropies).mean()
+
+    def char_teacher_forcing_logits(self, state: WordleState, partial: str) -> torch.Tensor:
+        """Return next-letter logits under teacher forcing prefix."""
+        return self._char_logits_for_partial(state, partial)
 
     def expand_vocab(self, new_max_vocab_size: int) -> int:
         """Grow the action vocabulary (and head) to ``new_max_vocab_size`` words.
@@ -376,6 +533,10 @@ class WordleGPT2Policy(nn.Module):
     ) -> Tuple[int, Optional[torch.Tensor]]:
         if state is None:
             raise ValueError("WordleGPT2Policy.get_action requires `state=WordleState` (embedding is unused).")
+        if self.action_granularity == "char":
+            word, log_prob, _ = self._sample_autoregressive_word(state, deterministic=deterministic)
+            action_idx = self.word_to_idx.get(word, 0)
+            return action_idx, (None if deterministic else log_prob)
         logits = self.forward_logits(state)
         if previous_guesses:
             # Single clone before in-place masking: avoids a fresh allocation per
@@ -402,6 +563,11 @@ class WordleGPT2Policy(nn.Module):
         previous_guesses: Optional[List[str]] = None,
         state: Optional[WordleState] = None,
     ) -> Tuple[str, Optional[torch.Tensor]]:
+        if state is None:
+            raise ValueError("WordleGPT2Policy.get_action_word requires `state=WordleState`.")
+        if self.action_granularity == "char":
+            word, lp, _ = self._sample_autoregressive_word(state, deterministic=deterministic)
+            return word, (None if deterministic else lp)
         idx, lp = self.get_action(
             state_embedding,
             deterministic=deterministic,
@@ -429,6 +595,34 @@ class WordleGPT2Policy(nn.Module):
             think = f"Conditioning on feedback, next guess: {word}."
         xml_action = f"<think>{think}</think>\n<guess>{word}</guess>"
         return xml_action, log_prob
+
+    def sample_word_with_stats(
+        self,
+        state: WordleState,
+        deterministic: bool = False,
+    ) -> Tuple[str, torch.Tensor, torch.Tensor]:
+        """Sample a guess word and return (word, log_prob, entropy)."""
+        if self.action_granularity == "char":
+            return self._sample_autoregressive_word(state, deterministic=deterministic)
+        logits = self.forward_logits(state)
+        if state.previous_guesses:
+            logits = logits.clone()
+            for g in state.previous_guesses:
+                u = g.upper()
+                if u in self.word_to_idx:
+                    logits[self.word_to_idx[u]] = -float("inf")
+        probs = F.softmax(logits, dim=-1)
+        dist = torch.distributions.Categorical(probs)
+        if deterministic:
+            idx = int(torch.argmax(probs).item())
+            lp = torch.log(probs[idx] + 1e-12)
+            ent = torch.zeros((), device=probs.device, dtype=probs.dtype)
+        else:
+            a = dist.sample()
+            idx = int(a.item())
+            lp = dist.log_prob(a)
+            ent = dist.entropy()
+        return self.idx_to_word[idx], lp, ent
 
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters())

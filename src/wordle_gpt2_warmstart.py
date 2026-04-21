@@ -98,12 +98,27 @@ def supervised_warm_start_wordle(
         nonlocal opt_steps
         if not state_buffer:
             return
-        targets = torch.tensor(target_buffer, dtype=torch.long, device=device)
-        if batch_size > 1 or len(state_buffer) > 1:
-            logits = policy.forward_logits_batch(state_buffer)  # [B, action_dim]
+        if getattr(policy, "action_granularity", "word") == "char":
+            # Teacher-forced next-letter CE over 5 positions; target word is still the hidden secret.
+            losses_char: List[torch.Tensor] = []
+            for st, tgt_idx in zip(state_buffer, target_buffer):
+                target_word = policy.idx_to_word[int(tgt_idx)]
+                partial = ""
+                for ch in target_word:
+                    logits = policy.char_teacher_forcing_logits(st, partial).unsqueeze(0)  # [1, 26]
+                    target_letter = torch.tensor(
+                        [ord(ch) - ord("A")], dtype=torch.long, device=device
+                    )
+                    losses_char.append(F.cross_entropy(logits, target_letter))
+                    partial += ch
+            loss = torch.stack(losses_char).mean()
         else:
-            logits = policy.forward_logits(state_buffer[0]).unsqueeze(0)
-        loss = F.cross_entropy(logits, targets)
+            targets = torch.tensor(target_buffer, dtype=torch.long, device=device)
+            if batch_size > 1 or len(state_buffer) > 1:
+                logits = policy.forward_logits_batch(state_buffer)  # [B, action_dim]
+            else:
+                logits = policy.forward_logits(state_buffer[0]).unsqueeze(0)
+            loss = F.cross_entropy(logits, targets)
         opt.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(trainable, 1.0)

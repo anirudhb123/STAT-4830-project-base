@@ -45,6 +45,9 @@ def _action_xml(word: str, state: Any) -> str:
 def _sample_action(
     policy: Any, state: Any, previous_guesses: Optional[List[str]]
 ) -> Tuple[str, torch.Tensor, torch.Tensor]:
+    if hasattr(policy, "sample_word_with_stats"):
+        word, log_prob, entropy = policy.sample_word_with_stats(state, deterministic=False)
+        return word, log_prob, entropy
     logits = policy.forward_logits(state)
     logits = _mask_logits_for_guesses(logits, policy, previous_guesses)
     dist = torch.distributions.Categorical(logits=logits)

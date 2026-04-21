@@ -344,7 +344,7 @@ class WordleEnvironmentWrapper:
         format_reward = 1.0 if len(guess) == 5 and guess.isalpha() else 0.0
         
         # Total reward
-        reward = correct_answer + partial_answer * 0.3 + length_bonus * 0.5 + format_reward * 0.1
+        reward = correct_answer + partial_answer * 0.3 + length_bonus * 0.5 #+ format_reward * 0.1
         
         # Check if done
         done = correct or turn >= self.max_turns

@@ -905,46 +905,49 @@ def train_es_wordle(
                 best_eval_success = float(eval_success)
                 best_params_snapshot = params.detach().to("cpu").clone()
 
-            _cos_str = "  n/a" if grad_cos != grad_cos else f"{grad_cos:+.2f}"
-            _dprobe_str = "  n/a" if probe_delta != probe_delta else f"{probe_delta:+.1%}"
-            _fb_str = "  n/a" if trie_fallback_rate != trie_fallback_rate else f"{trie_fallback_rate:.1%}"
+            _cos_str = "   n/a" if grad_cos != grad_cos else f"{grad_cos:+6.2f}"
+            _dprobe_str = "   n/a" if probe_delta != probe_delta else f"{probe_delta:+6.1%}"
+            _fb_str = "   n/a" if trie_fallback_rate != trie_fallback_rate else f"{trie_fallback_rate:6.1%}"
             if verbose:
                 _ev = "greedy" if eval_deterministic else "stoch"
                 _fl = {"return": "ret", "win": "win", "win_plus_return": "win+ret"}.get(
                     fitness_objective, fitness_objective
                 )
+                if iteration == 0:
+                    print(
+                        f"  Iter | "
+                        f"TRAIN: Fit({_fl:>7})  ES_win   popσ   | "
+                        f"EVAL ({_ev}): Succ    Rew  Turns | "
+                        f"OPT:    Δθ        |g|      |Δ|     cos | "
+                        f"SIG:   ess    wins  dprobe     fb%"
+                    )
                 print(
-                    f"Iter {iteration:4d} | "
-                    f"Fit({_fl}): {avg_fitness:6.3f} | "
-                    f"ES_win: {avg_es_win:5.1%} | "
-                    f"popσ: {pop_fitness_std:.4f} | "
-                    f"Eval Reward: {eval_reward:6.3f} | "
-                    f"Success: {eval_success:5.1%} ({_ev}) | "
-                    f"Turns: {eval_turns:4.1f} | "
-                    f"Grad‖: {grad_norm:.2f} | "
-                    f"Step‖: {step_norm:.4f} | "
-                    f"cos(ĝ): {_cos_str} | "
-                    f"‖θ-θ₀‖: {param_drift:.2f} | "
-                    f"ess: {ess_rank}/{N} | "
-                    f"wins: {win_count}/{N} | "
-                    f"dprobe: {_dprobe_str} | "
-                    f"fb%: {_fb_str} ({trie_steps} steps)"
+                    f"  {iteration:4d} | "
+                    f"             {avg_fitness:7.3f}  {avg_es_win:6.1%}  {pop_fitness_std:6.3f} | "
+                    f"              {eval_success:5.1%} {eval_reward:6.3f}  {eval_turns:4.1f} | "
+                    f"     {param_drift:6.2f} {grad_norm:10.2f} {step_norm:8.4f}  {_cos_str} | "
+                    f"     {ess_rank:>2d}/{N:<2d}  {win_count:>2d}/{N:<2d} {_dprobe_str}  {_fb_str}"
                 )
         elif verbose:
-            _cos_str = "  n/a" if grad_cos != grad_cos else f"{grad_cos:+.2f}"
-            _fb_str = "  n/a" if trie_fallback_rate != trie_fallback_rate else f"{trie_fallback_rate:.1%}"
+            _cos_str = "   n/a" if grad_cos != grad_cos else f"{grad_cos:+6.2f}"
+            _fb_str = "   n/a" if trie_fallback_rate != trie_fallback_rate else f"{trie_fallback_rate:6.1%}"
             _fl = {"return": "ret", "win": "win", "win_plus_return": "win+ret"}.get(
                 fitness_objective, fitness_objective
             )
+            if iteration == 0:
+                print(
+                    f"  Iter | "
+                    f"TRAIN: Fit({_fl:>7})  ES_win   popσ   | "
+                    f"EVAL: (skipped)              | "
+                    f"OPT:    Δθ        |g|      |Δ|     cos | "
+                    f"SIG:   ess    wins             fb%"
+                )
             print(
-                f"Iter {iteration:4d} | Fit({_fl}): {avg_fitness:6.3f} | "
-                f"ES_win: {avg_es_win:5.1%} | "
-                f"popσ: {pop_fitness_std:.4f} | "
-                f"Grad‖: {grad_norm:.2f} | Step‖: {step_norm:.4f} | "
-                f"cos(ĝ): {_cos_str} | "
-                f"‖θ-θ₀‖: {param_drift:.2f} | "
-                f"ess: {ess_rank}/{N} | wins: {win_count}/{N} | "
-                f"fb%: {_fb_str} ({trie_steps} steps) | (no eval)"
+                f"  {iteration:4d} | "
+                f"             {avg_fitness:7.3f}  {avg_es_win:6.1%}  {pop_fitness_std:6.3f} | "
+                f"                              | "
+                f"     {param_drift:6.2f} {grad_norm:10.2f} {step_norm:8.4f}  {_cos_str} | "
+                f"     {ess_rank:>2d}/{N:<2d}  {win_count:>2d}/{N:<2d}            {_fb_str}"
             )
 
     # Finalize best-iter bookkeeping. Single-element lists keep the history

@@ -340,16 +340,54 @@ def quick_eval_success_masked(
     if idx_to_word is None:
         raise RuntimeError("Policy does not expose idx_to_word; cannot run masked eval.")
 
-    # Static disallowed mask: indices NOT in `allowed` are forbidden every step.
-    disallow = torch.zeros(action_dim, dtype=torch.bool, device=device)
-    disallow[:] = True
-    for i in allowed:
-        if 0 <= i < action_dim:
-            disallow[i] = False
+    char_mode = getattr(policy, "action_granularity", "word") == "char"
 
     policy.eval()
     wins = 0
     with torch.no_grad():
+        if char_mode:
+            # In char mode the word-level head is frozen / never used at inference;
+            # restricting the head's argmax is meaningless (and its out_features may
+            # not even match the patched action_dim). Restrict via the trie instead:
+            # build a temporary trie over the allowed word subset, swap it in for
+            # the duration of the eval, then restore the original.
+            from wordle_gpt2_policy import _WordleVocabTrie  # local import: avoids cycle at module load
+
+            allowed_words = [
+                idx_to_word[i] for i in allowed if 0 <= i < action_dim and i in idx_to_word
+            ]
+            if not allowed_words:
+                return float("nan")
+            restricted_trie = _WordleVocabTrie(allowed_words)
+            original_trie = getattr(policy, "vocab_trie", None)
+            policy.vocab_trie = restricted_trie
+            try:
+                for _ in range(n_episodes):
+                    state = env.reset()
+                    done = False
+                    turns = 0
+                    info: Dict[str, Any] = {"correct_answer": 0.0}
+                    while not done and turns < max_turns:
+                        word = policy.sample_words_batch(
+                            [state], deterministic=not stochastic
+                        )[0]
+                        xml = _wrap_guess_xml(state, word)
+                        state, _, done, info = env.step(xml)
+                        turns += 1
+                    if float(info.get("correct_answer", 0.0)) >= 0.5:
+                        wins += 1
+            finally:
+                policy.vocab_trie = original_trie
+            return wins / max(1, n_episodes)
+
+        # Word-mode path: the original head-restricted argmax is well-defined.
+        # Static disallowed mask: indices NOT in `allowed` are forbidden every step.
+        disallow = torch.zeros(action_dim, dtype=torch.bool, device=device)
+        disallow[:] = True
+        for i in allowed:
+            if 0 <= i < action_dim:
+                disallow[i] = False
+
         for _ in range(n_episodes):
             state = env.reset()
             done = False

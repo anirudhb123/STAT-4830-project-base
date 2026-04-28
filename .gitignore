@@ -3,6 +3,6 @@ __pycache__/
 .pytest_cache/
 *.pyc
 caveman.txt
-models/wordle_gemma_es_head_LoRA.*.pt
+models/wordle_qwen_es_head.*.pt
 .agent-xdg
 .claude/

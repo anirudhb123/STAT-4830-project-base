@@ -57,7 +57,7 @@ def supervised_warm_start_wordle(
     behavior. With ``batch_size>1``, the policy must expose ``forward_logits_batch``
     (``WordleGPT2Policy`` does); episodes are still sampled one at a time, but a single
     batched LM forward + backward is performed every ``batch_size`` valid examples. This
-    reduces wall-clock dramatically for large LMs (e.g. Gemma-3-1B), at the cost of a
+    reduces wall-clock dramatically for large LMs (e.g. Qwen3-1.7B), at the cost of a
     smaller number of (effectively-larger) optimizer steps.
 
     ``n_steps`` always counts *sampled episodes*. The number of optimizer steps is

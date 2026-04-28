@@ -836,7 +836,7 @@ def train_es_wordle(
         # lockstep-batched rollout the ES fitness loop uses; per-episode
         # semantics (per-episode reward / success / turns appended in order,
         # greedy/sample switch via ``deterministic``) are preserved. With
-        # eval_every=1 + eval_n_episodes=50 + Gemma-3-1b this is otherwise the
+        # eval_every=1 + eval_n_episodes=50 + Qwen3-1.7B this is otherwise the
         # dominant wall-clock in the training loop.
         if iteration % eval_every == 0 or iteration == n_iterations - 1:
             if hasattr(policy, "forward_logits_batch") and eval_n_episodes > 1:

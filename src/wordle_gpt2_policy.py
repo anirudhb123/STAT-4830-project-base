@@ -1,7 +1,7 @@
 """
 Wordle policy using a pretrained Hugging Face causal LM plus a trainable linear head
 over a fixed 5-letter vocabulary. Supports raw-text tokenization for GPT-2-style models
-and chat-template tokenization for instruction-tuned models such as Gemma.
+and chat-template tokenization for instruction-tuned models such as Qwen3.
 """
 
 from __future__ import annotations
@@ -84,14 +84,14 @@ def _build_wordle_prompt(state: WordleState, richer_prompt: bool = True) -> str:
 
 def _default_use_chat_template(model_name: str) -> bool:
     lowered = model_name.lower()
-    return any(tag in lowered for tag in ("gemma", "instruct", "-it", "chat"))
+    return any(tag in lowered for tag in ("gemma", "qwen", "instruct", "-it", "chat"))
 
 
 def _default_lora_targets(model_name: str) -> List[str]:
     lowered = model_name.lower()
     if "gpt2" in lowered:
         return ["c_attn", "c_proj"]
-    if "gemma" in lowered:
+    if "gemma" in lowered or "qwen" in lowered:
         return ["q_proj", "k_proj", "v_proj", "o_proj"]
     raise ValueError(
         "No default LoRA target modules are defined for "
@@ -410,7 +410,7 @@ class WordleGPT2Policy(nn.Module):
                 raise RuntimeError(
                     f"Tokenizer for {self._model_name!r} does not expose apply_chat_template()."
                 )
-            messages = [{"role": "user", "content": [{"type": "text", "text": text}]}]
+            messages = [{"role": "user", "content": text}]
             enc = self.tokenizer.apply_chat_template(
                 messages,
                 add_generation_prompt=self.chat_generation_prompt,
@@ -537,7 +537,7 @@ class WordleGPT2Policy(nn.Module):
                     raise RuntimeError(
                         f"Tokenizer for {self._model_name!r} does not expose apply_chat_template()."
                     )
-                messages = [{"role": "user", "content": [{"type": "text", "text": text}]}]
+                messages = [{"role": "user", "content": text}]
                 enc = self.tokenizer.apply_chat_template(
                     messages,
                     add_generation_prompt=self.chat_generation_prompt,
@@ -823,12 +823,7 @@ class WordleGPT2Policy(nn.Module):
                 raise RuntimeError(
                     f"Tokenizer for {self._model_name!r} does not expose apply_chat_template()."
                 )
-            messages = [
-                {
-                    "role": "user",
-                    "content": [{"type": "text", "text": text}],
-                }
-            ]
+            messages = [{"role": "user", "content": text}]
             enc = self.tokenizer.apply_chat_template(
                 messages,
                 add_generation_prompt=self.chat_generation_prompt,

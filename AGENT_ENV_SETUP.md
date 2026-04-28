@@ -35,9 +35,9 @@ PY
 
 ## 2. Hugging Face setup
 
-Some notebooks and scripts load gated Hugging Face checkpoints such as Gemma.
+Some notebooks and scripts load gated Hugging Face checkpoints such as Qwen3.
 
-Gemma and other instruction-tuned checkpoints in this repo also rely on `transformers` chat templates, which require `jinja2>=3.1.0` in the active Python environment.
+Qwen3 and other instruction-tuned checkpoints in this repo also rely on `transformers` chat templates, which require `jinja2>=3.1.0` in the active Python environment.
 
 Inside the active repo environment:
 
@@ -79,7 +79,7 @@ if torch.cuda.is_available():
 
 If the notebook uses a different interpreter than the shell, fix the kernel before debugging anything else.
 
-If the notebook uses Gemma or another chat-template model, also verify `jinja2>=3.1.0` inside that same kernel:
+If the notebook uses a chat-template model (e.g. Qwen3), also verify `jinja2>=3.1.0` inside that same kernel:
 
 ```python
 import jinja2
@@ -125,7 +125,7 @@ Interpretation:
 - `nvidia-smi` works but `torch.cuda.is_available()` is `False`: usually a PyTorch/driver compatibility problem.
 - `CUDA_VISIBLE_DEVICES` is empty or restrictive: GPU may be hidden from the process.
 - `torch.cuda.device_count() > 0` but device queries fail: CUDA initialization is partially seeing hardware but rejecting the runtime stack.
-- Gemma or other chat-template models fail with `apply_chat_template requires jinja2>=3.1.0`: upgrade `jinja2` in the active environment and restart the kernel.
+- Chat-template models (e.g. Qwen3) fail with `apply_chat_template requires jinja2>=3.1.0`: upgrade `jinja2` in the active environment and restart the kernel.
 
 ## 5. CUDA/PyTorch compatibility workflow
 
@@ -239,7 +239,7 @@ When a user says "CUDA is false" or "GPU is not detected", do these in order:
 5. If the GPU is visible to the OS but not to PyTorch, treat it as a runtime compatibility problem first.
 6. Fix the environment, restart the kernel, and verify again.
 
-For Gemma/chat-template failures specifically:
+For Qwen3/chat-template failures specifically:
 
 ```bash
 python -m pip install -U "jinja2>=3.1.0"

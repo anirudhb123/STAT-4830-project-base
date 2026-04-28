@@ -125,6 +125,8 @@ def _rollout_batched(
     infos: List[Dict[str, Any]] = [{} for _ in range(n_episodes)]
     turn_counts = [0] * n_episodes
 
+    char_mode = getattr(policy, "action_granularity", "word") == "char"
+
     policy.eval()
     with torch.no_grad():
         for _t in range(max_turns):
@@ -133,35 +135,46 @@ def _rollout_batched(
                 break
 
             active_states = [states[i] for i in active]
-            logits_b = policy.forward_logits_batch(active_states)  # [len(active), action_dim]
 
-            # Mask previous-guess actions to -inf per row (matches
-            # WordleGPT2Policy.get_action behavior).
-            word_to_idx = getattr(policy, "word_to_idx", None)
-            if word_to_idx is not None:
-                logits_b = logits_b.clone()
-                for j, i in enumerate(active):
-                    for g in states[i].previous_guesses:
-                        u = g.upper()
-                        idx = word_to_idx.get(u)
-                        if idx is not None:
-                            logits_b[j, idx] = float("-inf")
-
-            if deterministic:
-                action_idxs = torch.argmax(logits_b, dim=-1)
+            if char_mode:
+                # Char-mode autoregressive sampling, batched across the population at each
+                # of the 5 character positions. Trie + feedback masks are applied per-row
+                # inside ``sample_words_batch``; previously-guessed words are also avoided.
+                words_active = policy.sample_words_batch(
+                    active_states, deterministic=deterministic, avoid_previous_guesses=True
+                )
             else:
-                probs = torch.softmax(logits_b, dim=-1)
-                action_idxs = torch.distributions.Categorical(probs=probs).sample()
+                logits_b = policy.forward_logits_batch(active_states)  # [len(active), action_dim]
 
-            idx_to_word = getattr(policy, "idx_to_word", None)
-            for j, i in enumerate(active):
-                aidx = int(action_idxs[j].item())
-                if idx_to_word is not None:
-                    word = idx_to_word[aidx]
+                # Mask previous-guess actions to -inf per row (matches
+                # WordleGPT2Policy.get_action behavior).
+                word_to_idx = getattr(policy, "word_to_idx", None)
+                if word_to_idx is not None:
+                    logits_b = logits_b.clone()
+                    for j, i in enumerate(active):
+                        for g in states[i].previous_guesses:
+                            u = g.upper()
+                            idx = word_to_idx.get(u)
+                            if idx is not None:
+                                logits_b[j, idx] = float("-inf")
+
+                if deterministic:
+                    action_idxs = torch.argmax(logits_b, dim=-1)
                 else:
-                    word = policy.vocab.action_to_word(aidx)
-                action_xml = _format_action_xml_for_word(states[i], word)
+                    probs = torch.softmax(logits_b, dim=-1)
+                    action_idxs = torch.distributions.Categorical(probs=probs).sample()
 
+                idx_to_word = getattr(policy, "idx_to_word", None)
+                words_active = []
+                for j in range(len(active)):
+                    aidx = int(action_idxs[j].item())
+                    if idx_to_word is not None:
+                        words_active.append(idx_to_word[aidx])
+                    else:
+                        words_active.append(policy.vocab.action_to_word(aidx))
+
+            for j, i in enumerate(active):
+                action_xml = _format_action_xml_for_word(states[i], words_active[j])
                 env.current_state = states[i]
                 next_state, r, d, info = env.step(action_xml)
                 states[i] = next_state
@@ -641,6 +654,9 @@ def train_es_wordle(
     history["train_ess_rank"] = []
     history["train_win_count"] = []
     history["train_probe_delta"] = []
+    history["train_trie_fallback_rate"] = []
+    history["train_trie_steps"] = []
+    history["train_trie_oov_words"] = []
 
     # Best-iter checkpointing: populated on eval iters whenever eval_success
     # meets or exceeds the running best. We store a CPU snapshot of the flat
@@ -697,6 +713,8 @@ def train_es_wordle(
             _restore_rng_state(rng_snap, policy_device)
 
     for iteration in range(n_iterations):
+        if hasattr(policy, "reset_trie_stats"):
+            policy.reset_trie_stats()
         # ES gradient step
         (
             gradient,
@@ -720,6 +738,18 @@ def train_es_wordle(
             baseline_subtract=baseline_subtract,
             per_iter_secret_subset_size=per_iter_secret_subset_size,
         )
+        trie_stats = (
+            policy.trie_stats()
+            if hasattr(policy, "trie_stats")
+            else {
+                "trie_fallback_rate": float("nan"),
+                "trie_steps": 0,
+                "oov_words": 0,
+            }
+        )
+        trie_fallback_rate = float(trie_stats.get("trie_fallback_rate", float("nan")))
+        trie_steps = int(trie_stats.get("trie_steps", 0))
+        trie_oov_words = int(trie_stats.get("oov_words", 0))
 
         # Cosine between raw ĝ_t and ĝ_{t-1}: positive values indicate a consistent
         # direction across iterations (real signal); near-zero means diffusion.
@@ -797,6 +827,9 @@ def train_es_wordle(
         history["train_ess_rank"].append(ess_rank)
         history["train_win_count"].append(win_count)
         history["train_probe_delta"].append(probe_delta)
+        history["train_trie_fallback_rate"].append(trie_fallback_rate)
+        history["train_trie_steps"].append(trie_steps)
+        history["train_trie_oov_words"].append(trie_oov_words)
 
         # Periodic evaluation (full rollout stats; slow when eval_n_episodes is large).
         # When the policy exposes ``forward_logits_batch`` we use the same
@@ -874,6 +907,7 @@ def train_es_wordle(
 
             _cos_str = "  n/a" if grad_cos != grad_cos else f"{grad_cos:+.2f}"
             _dprobe_str = "  n/a" if probe_delta != probe_delta else f"{probe_delta:+.1%}"
+            _fb_str = "  n/a" if trie_fallback_rate != trie_fallback_rate else f"{trie_fallback_rate:.1%}"
             if verbose:
                 _ev = "greedy" if eval_deterministic else "stoch"
                 _fl = {"return": "ret", "win": "win", "win_plus_return": "win+ret"}.get(
@@ -893,10 +927,12 @@ def train_es_wordle(
                     f"‖θ-θ₀‖: {param_drift:.2f} | "
                     f"ess: {ess_rank}/{N} | "
                     f"wins: {win_count}/{N} | "
-                    f"dprobe: {_dprobe_str}"
+                    f"dprobe: {_dprobe_str} | "
+                    f"fb%: {_fb_str} ({trie_steps} steps)"
                 )
         elif verbose:
             _cos_str = "  n/a" if grad_cos != grad_cos else f"{grad_cos:+.2f}"
+            _fb_str = "  n/a" if trie_fallback_rate != trie_fallback_rate else f"{trie_fallback_rate:.1%}"
             _fl = {"return": "ret", "win": "win", "win_plus_return": "win+ret"}.get(
                 fitness_objective, fitness_objective
             )
@@ -907,7 +943,8 @@ def train_es_wordle(
                 f"Grad‖: {grad_norm:.2f} | Step‖: {step_norm:.4f} | "
                 f"cos(ĝ): {_cos_str} | "
                 f"‖θ-θ₀‖: {param_drift:.2f} | "
-                f"ess: {ess_rank}/{N} | wins: {win_count}/{N} | (no eval)"
+                f"ess: {ess_rank}/{N} | wins: {win_count}/{N} | "
+                f"fb%: {_fb_str} ({trie_steps} steps) | (no eval)"
             )
 
     # Finalize best-iter bookkeeping. Single-element lists keep the history
@@ -946,6 +983,9 @@ _PER_ITER_KEYS = (
     "train_ess_rank",
     "train_win_count",
     "train_probe_delta",
+    "train_trie_fallback_rate",
+    "train_trie_steps",
+    "train_trie_oov_words",
 )
 # Keys produced once per eval checkpoint.
 _PER_EVAL_KEYS = (

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import inspect
 import re
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Set
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Set, Union
 
 import numpy as np
 import torch
@@ -150,6 +150,68 @@ def _last_non_padding_index(attention_mask: torch.Tensor) -> torch.Tensor:
     return masked_positions.max(dim=1).values
 
 
+class _WordleVocabTrie:
+    """Trie over uppercase 5-letter words for online prefix-validity checks.
+
+    Each node holds a length-26 list of child node indices (or None) and a terminal flag.
+    A precomputed ``[num_nodes, 26]`` bool tensor (``_masks``) lets ``valid_children_mask``
+    return a row in O(1) without rebuilding a tensor each call. The tensor is lazily moved
+    to the requested device the first time it's accessed there, then cached per device.
+    """
+
+    __slots__ = ("_children", "_terminal", "_masks_cpu", "_masks_by_device")
+
+    def __init__(self, words: Iterable[str]) -> None:
+        # Node 0 is root. Children stored as list-of-lists for O(1) Python-side lookup.
+        self._children: List[List[int]] = [[-1] * 26]
+        self._terminal: List[bool] = [False]
+        for raw in words:
+            w = raw.upper()
+            if len(w) != 5 or not w.isalpha():
+                continue
+            node = 0
+            for ch in w:
+                ci = ord(ch) - ord("A")
+                nxt = self._children[node][ci]
+                if nxt < 0:
+                    self._children.append([-1] * 26)
+                    self._terminal.append(False)
+                    nxt = len(self._children) - 1
+                    self._children[node][ci] = nxt
+                node = nxt
+            self._terminal[node] = True
+        # Precompute the [num_nodes, 26] bool mask once on CPU; ship to GPU lazily.
+        masks = torch.zeros((len(self._children), 26), dtype=torch.bool)
+        for n, row in enumerate(self._children):
+            for ci, c in enumerate(row):
+                if c >= 0:
+                    masks[n, ci] = True
+        self._masks_cpu: torch.Tensor = masks
+        self._masks_by_device: Dict[torch.device, torch.Tensor] = {masks.device: masks}
+
+    def root(self) -> int:
+        return 0
+
+    def step(self, node: int, letter_idx: int) -> int:
+        """Return the child node id for ``letter_idx``, or -1 if absent."""
+        if node < 0:
+            return -1
+        return self._children[node][letter_idx]
+
+    def _masks_on(self, device: torch.device) -> torch.Tensor:
+        m = self._masks_by_device.get(device)
+        if m is None:
+            m = self._masks_cpu.to(device)
+            self._masks_by_device[device] = m
+        return m
+
+    def valid_children_mask(self, node: int, device: torch.device) -> torch.Tensor:
+        """bool[26] of letters that lead to at least one valid completion from ``node``."""
+        if node < 0:
+            return torch.zeros(26, dtype=torch.bool, device=device)
+        return self._masks_on(device)[node]
+
+
 class WordleGPT2Policy(nn.Module):
     """
     Hugging Face causal LM encoder + trainable logits head over a vocabulary subset.
@@ -256,6 +318,42 @@ class WordleGPT2Policy(nn.Module):
         nn.init.orthogonal_(self.char_head.weight, gain=0.01)
         nn.init.zeros_(self.char_head.bias)
 
+        self.vocab_trie: Optional[_WordleVocabTrie] = (
+            _WordleVocabTrie(self.words) if self.action_granularity == "char" else None
+        )
+
+        # In char mode the word-level head is unused at inference (action_idx is a
+        # vocabulary lookup, not an argmax over logits) — keep it frozen so ES does
+        # not waste ~hidden*action_dim perturbation dims on a parameter that has no
+        # effect on rollout reward. Same reasoning applies to warm-start CE: the
+        # char-mode path computes loss against char_head only.
+        if self.action_granularity == "char":
+            self.head.weight.requires_grad = False
+            self.head.bias.requires_grad = False
+        self._trie_step_count: int = 0
+        self._trie_fallback_count: int = 0
+        self._trie_oov_word_count: int = 0
+
+    def reset_trie_stats(self) -> None:
+        """Zero out trie instrumentation counters (call at start of each ES iter / WS epoch)."""
+        self._trie_step_count = 0
+        self._trie_fallback_count = 0
+        self._trie_oov_word_count = 0
+
+    def trie_stats(self) -> Dict[str, Union[int, float]]:
+        """Snapshot of trie-mask usage stats; ``trie_fallback_rate`` is fallbacks / steps."""
+        rate = (
+            self._trie_fallback_count / self._trie_step_count
+            if self._trie_step_count
+            else 0.0
+        )
+        return {
+            "trie_steps": self._trie_step_count,
+            "trie_fallbacks": self._trie_fallback_count,
+            "trie_fallback_rate": rate,
+            "oov_words": self._trie_oov_word_count,
+        }
+
     @staticmethod
     def _letter_to_idx(letter: str) -> int:
         return ord(letter) - ord("A")
@@ -357,20 +455,37 @@ class WordleGPT2Policy(nn.Module):
         letters: List[str] = []
         log_probs: List[torch.Tensor] = []
         entropies: List[torch.Tensor] = []
+        trie_node = self.vocab_trie.root() if self.vocab_trie is not None else -1
         for pos in range(5):
             logits = self._char_logits_for_partial(state, "".join(letters)).clone()
-            # Hard position constraints from prior Wordle feedback.
+            device = logits.device
+
+            # 1) Build feedback mask (bool[26], True == allowed by Wordle feedback).
+            feedback_mask = torch.ones(26, dtype=torch.bool, device=device)
             fixed = constraints["fixed"].get(pos)
             if fixed is not None:
-                forced_idx = self._letter_to_idx(fixed)
-                mask = torch.full_like(logits, float("-inf"))
-                mask[forced_idx] = 0.0
-                logits = logits + mask
+                feedback_mask[:] = False
+                feedback_mask[self._letter_to_idx(fixed)] = True
             else:
                 for blocked in constraints["blocked_pos"][pos]:
-                    logits[self._letter_to_idx(blocked)] = float("-inf")
+                    feedback_mask[self._letter_to_idx(blocked)] = False
                 for banned in constraints["banned_global"]:
-                    logits[self._letter_to_idx(banned)] = float("-inf")
+                    feedback_mask[self._letter_to_idx(banned)] = False
+
+            # 2) Combine with trie mask if available; fall back to feedback-only on empty intersection.
+            if self.vocab_trie is not None:
+                trie_mask = self.vocab_trie.valid_children_mask(trie_node, device=device)
+                combined = feedback_mask & trie_mask
+                self._trie_step_count += 1
+                if not bool(combined.any()):
+                    self._trie_fallback_count += 1
+                    combined = feedback_mask
+            else:
+                combined = feedback_mask
+
+            # 3) Apply mask to logits (mask=False -> -inf).
+            logits = logits.masked_fill(~combined, float("-inf"))
+
             probs = F.softmax(logits, dim=-1)
             dist = torch.distributions.Categorical(probs)
             if deterministic:
@@ -385,24 +500,262 @@ class WordleGPT2Policy(nn.Module):
             letters.append(self._idx_to_letter(idx))
             log_probs.append(lp)
             entropies.append(ent)
-        word = "".join(letters)
-        if constraints["required"]:
-            for req in constraints["required"]:
-                if req not in word:
-                    missing_idx = self._letter_to_idx(req)
-                    # Replace earliest non-fixed spot to satisfy yellow/green evidence.
-                    for i in range(5):
-                        if constraints["fixed"].get(i) is None:
-                            letters[i] = self._idx_to_letter(missing_idx)
-                            break
-                    word = "".join(letters)
-                    if req in word:
-                        break
+
+            # 4) Advance trie node; reset to root if fallback drove us off the tree.
+            if self.vocab_trie is not None:
+                trie_node = self.vocab_trie.step(trie_node, idx)
+                if trie_node < 0:
+                    trie_node = self.vocab_trie.root()
+        word = self._post_sample_fixup(letters, constraints)
+        if self.vocab_trie is not None and word not in self.word_to_idx:
+            self._trie_oov_word_count += 1
         return word, torch.stack(log_probs).sum(), torch.stack(entropies).mean()
 
     def char_teacher_forcing_logits(self, state: WordleState, partial: str) -> torch.Tensor:
         """Return next-letter logits under teacher forcing prefix."""
         return self._char_logits_for_partial(state, partial)
+
+    def _char_logits_for_partials_batch(
+        self, states: Sequence[WordleState], partials: Sequence[str]
+    ) -> torch.Tensor:
+        """Batched next-letter logits across multiple (state, partial) pairs. Returns ``[B, 26]``."""
+        if len(states) != len(partials):
+            raise ValueError("states and partials must have the same length.")
+        device = self.head.weight.device
+        if not states:
+            return torch.empty(0, 26, device=device, dtype=self.char_head.weight.dtype)
+
+        encs: List[Dict[str, torch.Tensor]] = []
+        for state, partial in zip(states, partials):
+            text = _build_wordle_prompt(state, richer_prompt=self.richer_prompt)
+            text += (
+                f"\nCurrent guess prefix: {partial if partial else '(empty)'}"
+                "\nPredict the next uppercase letter:"
+            )
+            if self.use_chat_template:
+                if not hasattr(self.tokenizer, "apply_chat_template"):
+                    raise RuntimeError(
+                        f"Tokenizer for {self._model_name!r} does not expose apply_chat_template()."
+                    )
+                messages = [{"role": "user", "content": [{"type": "text", "text": text}]}]
+                enc = self.tokenizer.apply_chat_template(
+                    messages,
+                    add_generation_prompt=self.chat_generation_prompt,
+                    tokenize=True,
+                    return_dict=True,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=self.max_prompt_length,
+                    padding="max_length",
+                )
+            else:
+                enc = self.tokenizer(
+                    text,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=self.max_prompt_length,
+                    padding="max_length",
+                )
+            encs.append(_filter_model_inputs(dict(enc), self._lm_forward_keys))
+
+        keys = list(encs[0].keys())
+        if not all(set(e.keys()) == set(keys) for e in encs):
+            raise RuntimeError("encode_prompt returned inconsistent keys across states.")
+        model_inputs = {
+            k: torch.cat([e[k] for e in encs], dim=0).to(device) for k in keys
+        }
+        attn = model_inputs.get("attention_mask")
+        if self._lm_trainable:
+            out = self.lm(**model_inputs, output_hidden_states=True, return_dict=True)
+        else:
+            with torch.no_grad():
+                out = self.lm(**model_inputs, output_hidden_states=True, return_dict=True)
+        last_hidden_state = _extract_last_hidden_state(out)
+        if attn is not None:
+            idx = _last_non_padding_index(attn)
+            batch_arange = torch.arange(last_hidden_state.size(0), device=last_hidden_state.device)
+            h = last_hidden_state[batch_arange, idx]
+        else:
+            h = last_hidden_state[:, -1]
+        h = h.to(self.char_head.weight.dtype)
+        return self.char_head(h)
+
+    def sample_words_batch(
+        self,
+        states: Sequence[WordleState],
+        deterministic: bool = False,
+        avoid_previous_guesses: bool = True,
+    ) -> List[str]:
+        """Char-mode autoregressive sampler that batches the LM forward across ``states``.
+
+        At each of the 5 character positions we run a single batched LM forward over all
+        active games (one row per game), apply per-row feedback + trie masks, and sample.
+        That is 5 LM forwards per turn instead of the (n_active * 5) the per-game path would
+        do, which is the only way char-mode rollouts come close to the wall-clock of the
+        word-level head on a GPU.
+
+        ``avoid_previous_guesses=True`` performs a cheap post-sample fixup: if the sampled
+        word matches one of ``state.previous_guesses``, we re-sample once with the same
+        masks. This is best-effort — under near-deterministic policies the same word may
+        recur — and is only meant to avoid trivially wasting a turn on a known guess.
+        """
+        if self.action_granularity != "char":
+            raise RuntimeError(
+                "sample_words_batch requires action_granularity='char'."
+            )
+        n = len(states)
+        if n == 0:
+            return []
+        constraints_list = [self._feedback_constraints(s) for s in states]
+        trie_nodes: List[int] = [
+            self.vocab_trie.root() if self.vocab_trie is not None else -1 for _ in range(n)
+        ]
+        letters_per: List[List[str]] = [[] for _ in range(n)]
+
+        for pos in range(5):
+            partials = ["".join(letters_per[i]) for i in range(n)]
+            logits_batch = self._char_logits_for_partials_batch(states, partials).clone()  # [n, 26]
+            device = logits_batch.device
+
+            for i in range(n):
+                constraints = constraints_list[i]
+                feedback_mask = torch.ones(26, dtype=torch.bool, device=device)
+                fixed = constraints["fixed"].get(pos)
+                if fixed is not None:
+                    feedback_mask[:] = False
+                    feedback_mask[self._letter_to_idx(fixed)] = True
+                else:
+                    for blocked in constraints["blocked_pos"][pos]:
+                        feedback_mask[self._letter_to_idx(blocked)] = False
+                    for banned in constraints["banned_global"]:
+                        feedback_mask[self._letter_to_idx(banned)] = False
+
+                if self.vocab_trie is not None:
+                    trie_mask = self.vocab_trie.valid_children_mask(trie_nodes[i], device=device)
+                    combined = feedback_mask & trie_mask
+                    self._trie_step_count += 1
+                    if not bool(combined.any()):
+                        self._trie_fallback_count += 1
+                        combined = feedback_mask
+                else:
+                    combined = feedback_mask
+                logits_batch[i].masked_fill_(~combined, float("-inf"))
+
+            probs = F.softmax(logits_batch, dim=-1)
+            if deterministic:
+                sampled = torch.argmax(probs, dim=-1)
+            else:
+                sampled = torch.distributions.Categorical(probs=probs).sample()
+
+            for i in range(n):
+                ci = int(sampled[i].item())
+                letters_per[i].append(self._idx_to_letter(ci))
+                if self.vocab_trie is not None:
+                    nxt = self.vocab_trie.step(trie_nodes[i], ci)
+                    trie_nodes[i] = nxt if nxt >= 0 else self.vocab_trie.root()
+
+        words: List[str] = []
+        for i in range(n):
+            constraints = constraints_list[i]
+            word = self._post_sample_fixup(letters_per[i], constraints)
+            if (
+                avoid_previous_guesses
+                and word in (states[i].previous_guesses or [])
+            ):
+                alt = self._sample_alt_word(states[i], constraints, exclude={word}, deterministic=deterministic)
+                if alt is not None:
+                    word = alt
+            if self.vocab_trie is not None and word not in self.word_to_idx:
+                self._trie_oov_word_count += 1
+            words.append(word)
+        return words
+
+    def _sample_alt_word(
+        self,
+        state: WordleState,
+        constraints: Dict[str, Any],
+        exclude: Set[str],
+        deterministic: bool,
+    ) -> Optional[str]:
+        """Cheap fallback: pick the in-vocab word, consistent with feedback constraints,
+        that has not been previously guessed and is not in ``exclude``. Used to dodge
+        duplicate-guess turn waste when the LM samples a word the agent has already
+        played. Returns None if no candidate exists.
+
+        We skip the LM here on purpose: this is rare-path correction code, the trie
+        already enforces in-vocab membership, and the candidate set is small (≤ vocab).
+        """
+        previous = set(state.previous_guesses or [])
+        candidates: List[str] = []
+        for w in self.words:
+            if w in exclude or w in previous:
+                continue
+            ok = True
+            for pos, ch in enumerate(w):
+                fixed = constraints["fixed"].get(pos)
+                if fixed is not None and ch != fixed:
+                    ok = False
+                    break
+                if ch in constraints["blocked_pos"][pos]:
+                    ok = False
+                    break
+                if ch in constraints["banned_global"]:
+                    ok = False
+                    break
+            if not ok:
+                continue
+            for req in constraints["required"]:
+                if req not in w:
+                    ok = False
+                    break
+            if ok:
+                candidates.append(w)
+        if not candidates:
+            return None
+        if deterministic:
+            return candidates[0]
+        # Random pick — cheap and avoids any LM call.
+        import random as _random
+        return _random.choice(candidates)
+
+    def _post_sample_fixup(self, letters: List[str], constraints: Dict[str, Any]) -> str:
+        """Apply the required-letter fixup, but only commit a swap if it yields an in-vocab word.
+
+        The original fixup blindly overwrote a non-fixed position with a missing required
+        letter, which often produced OOV words once the vocab-trie was active. We now try
+        each non-fixed position in turn and keep the first swap whose resulting 5-letter
+        word is in ``self.word_to_idx``. If no in-vocab swap exists, leave the word
+        unchanged (caller will count it as OOV).
+        """
+        word = "".join(letters)
+        if not constraints["required"]:
+            return word
+        for req in constraints["required"]:
+            if req in word:
+                continue
+            missing_idx = self._letter_to_idx(req)
+            best_swap: Optional[Tuple[int, str]] = None
+            for i in range(5):
+                if constraints["fixed"].get(i) is not None:
+                    continue
+                candidate = list(letters)
+                candidate[i] = self._idx_to_letter(missing_idx)
+                cand_word = "".join(candidate)
+                if cand_word in self.word_to_idx:
+                    best_swap = (i, cand_word)
+                    break
+            if best_swap is not None:
+                pos, cand_word = best_swap
+                letters[pos] = self._idx_to_letter(missing_idx)
+                word = cand_word
+            else:
+                # Fallback: do the legacy overwrite (will count as OOV at the call site).
+                for i in range(5):
+                    if constraints["fixed"].get(i) is None:
+                        letters[i] = self._idx_to_letter(missing_idx)
+                        break
+                word = "".join(letters)
+        return word
 
     def expand_vocab(self, new_max_vocab_size: int) -> int:
         """Grow the action vocabulary (and head) to ``new_max_vocab_size`` words.
@@ -451,6 +804,11 @@ class WordleGPT2Policy(nn.Module):
         self.word_to_idx = {w: i for i, w in enumerate(self.words)}
         self.idx_to_word = {i: w for i, w in enumerate(self.words)}
         self.action_dim = new_n
+        if self.action_granularity == "char":
+            self.vocab_trie = _WordleVocabTrie(self.words)
+            # The new head is fresh (Linear default requires_grad=True); refreeze.
+            self.head.weight.requires_grad = False
+            self.head.bias.requires_grad = False
         return self.action_dim
 
     def encode_prompt(self, state: WordleState) -> dict:

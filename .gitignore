@@ -5,3 +5,4 @@ __pycache__/
 caveman.txt
 models/wordle_gemma_es_head_LoRA.*.pt
 .agent-xdg
+.claude/

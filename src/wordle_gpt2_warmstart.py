@@ -100,18 +100,50 @@ def supervised_warm_start_wordle(
             return
         if getattr(policy, "action_granularity", "word") == "char":
             # Teacher-forced next-letter CE over 5 positions; target word is still the hidden secret.
-            losses_char: List[torch.Tensor] = []
-            for st, tgt_idx in zip(state_buffer, target_buffer):
-                target_word = policy.idx_to_word[int(tgt_idx)]
-                partial = ""
-                for ch in target_word:
-                    logits = policy.char_teacher_forcing_logits(st, partial).unsqueeze(0)  # [1, 26]
-                    target_letter = torch.tensor(
-                        [ord(ch) - ord("A")], dtype=torch.long, device=device
+            # Apply the same vocab-trie mask as inference so train/eval distributions match.
+            #
+            # Batched per position: instead of B*5 sequential LM forwards, do 5 batched
+            # forwards (one per char position) over all B states in the buffer. Equivalent
+            # math to the per-example loop — F.cross_entropy with reduction='mean' over the
+            # concatenated [5*B, 26] logits matches the prior mean-of-stacked-scalars.
+            trie = getattr(policy, "vocab_trie", None)
+            target_words = [policy.idx_to_word[int(t)] for t in target_buffer]
+            B = len(state_buffer)
+            # Precompute per-state trie nodes at each position (positions 0..4), driven by
+            # the *true* target letters (teacher forcing) — same walk the per-example loop did.
+            trie_nodes_per_pos: List[List[int]] = []
+            if trie is not None:
+                cur_nodes = [trie.root() for _ in range(B)]
+                trie_nodes_per_pos.append(list(cur_nodes))
+                for pos in range(4):
+                    nxt = []
+                    for i in range(B):
+                        nxt.append(trie.step(cur_nodes[i], ord(target_words[i][pos]) - ord("A")))
+                    cur_nodes = nxt
+                    trie_nodes_per_pos.append(list(cur_nodes))
+
+            all_logits: List[torch.Tensor] = []
+            all_targets: List[torch.Tensor] = []
+            for pos in range(5):
+                partials = [tw[:pos] for tw in target_words]
+                logits_pos = policy._char_logits_for_partials_batch(state_buffer, partials)  # [B, 26]
+                if trie is not None:
+                    masks = torch.stack(
+                        [
+                            trie.valid_children_mask(trie_nodes_per_pos[pos][i], device=logits_pos.device)
+                            for i in range(B)
+                        ],
+                        dim=0,
                     )
-                    losses_char.append(F.cross_entropy(logits, target_letter))
-                    partial += ch
-            loss = torch.stack(losses_char).mean()
+                    logits_pos = logits_pos.masked_fill(~masks, float("-inf"))
+                targets_pos = torch.tensor(
+                    [ord(tw[pos]) - ord("A") for tw in target_words],
+                    dtype=torch.long,
+                    device=logits_pos.device,
+                )
+                all_logits.append(logits_pos)
+                all_targets.append(targets_pos)
+            loss = F.cross_entropy(torch.cat(all_logits, dim=0), torch.cat(all_targets, dim=0))
         else:
             targets = torch.tensor(target_buffer, dtype=torch.long, device=device)
             if batch_size > 1 or len(state_buffer) > 1:

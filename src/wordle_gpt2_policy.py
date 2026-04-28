@@ -414,6 +414,7 @@ class WordleGPT2Policy(nn.Module):
             enc = self.tokenizer.apply_chat_template(
                 messages,
                 add_generation_prompt=self.chat_generation_prompt,
+                enable_thinking=False,
                 tokenize=True,
                 return_dict=True,
                 return_tensors="pt",
@@ -541,6 +542,7 @@ class WordleGPT2Policy(nn.Module):
                 enc = self.tokenizer.apply_chat_template(
                     messages,
                     add_generation_prompt=self.chat_generation_prompt,
+                    enable_thinking=False,
                     tokenize=True,
                     return_dict=True,
                     return_tensors="pt",
@@ -827,6 +829,7 @@ class WordleGPT2Policy(nn.Module):
             enc = self.tokenizer.apply_chat_template(
                 messages,
                 add_generation_prompt=self.chat_generation_prompt,
+                enable_thinking=False,
                 tokenize=True,
                 return_dict=True,
                 return_tensors="pt",

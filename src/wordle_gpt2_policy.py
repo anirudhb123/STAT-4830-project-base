@@ -690,6 +690,11 @@ class WordleGPT2Policy(nn.Module):
         for w in self.words:
             if w in exclude or w in previous:
                 continue
+            # Defensive: skip any vocab entry that is not a clean 5-letter word.
+            # Bad data (e.g. comment lines that leak through a loose filter) would
+            # otherwise trigger KeyError on constraints["blocked_pos"][pos>=5].
+            if len(w) != 5 or not w.isalpha():
+                continue
             ok = True
             for pos, ch in enumerate(w):
                 fixed = constraints["fixed"].get(pos)

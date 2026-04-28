@@ -1,6 +1,3 @@
-# Canonical NYT Wordle answer list (~2300 five-letter words).
-# Source: github.com/tabatkins/wordle-list (mirrors the original public NYT list).
-# One word per line, lowercase. Lines starting with '#' are comments.
 aback
 abase
 abate

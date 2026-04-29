@@ -6,3 +6,4 @@ caveman.txt
 models/wordle_qwen_es_head.*.pt
 .agent-xdg
 .claude/
+.cursor_tmp/

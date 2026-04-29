@@ -400,7 +400,6 @@ class WordleEnvironmentWrapper:
             "correct_answer": correct_answer,
             "partial_answer": partial_answer,
             "length_bonus": length_bonus,
-            "format_reward": format_reward,
             "guess": guess,
             "turn": turn,
             "feedback": feedback,

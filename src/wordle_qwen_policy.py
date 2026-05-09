@@ -50,6 +50,12 @@ except ImportError:
 _GUESS_RE = re.compile(r"<guess>(.*?)</guess>", re.IGNORECASE | re.DOTALL)
 _FIVE_LETTER_RE = re.compile(r"[A-Za-z]{5}")
 _NON_ALPHA_RE = re.compile(r"[^A-Za-z]")
+# Strip both closed and unclosed-tail thinking tags before the 5-letter-run fallback.
+# Without this the literal word "think" inside ``<think>...`` is the first 5-letter
+# match and gets emitted as the guess on every turn.
+_THINK_CLOSED_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
+_THINK_UNCLOSED_TAIL_RE = re.compile(r"<think>.*$", re.IGNORECASE | re.DOTALL)
+_TAG_RE = re.compile(r"</?\s*[A-Za-z][A-Za-z0-9_-]*\s*>")
 
 
 def _build_wordle_prompt(state: WordleState, richer_prompt: bool = True) -> str:
@@ -273,8 +279,8 @@ class WordleQwenPolicy(nn.Module):
 
         - ``parsed_clean=True`` iff a well-formed ``<guess>5-letter-word</guess>``
           was found (after stripping non-alpha chars like brackets/whitespace).
-        - ``parsed_clean=False`` indicates a fallback path (first 5-letter run, or
-          the ``"XXXXX"`` sentinel).
+        - ``parsed_clean=False`` indicates a fallback path (first 5-letter run in
+          the post-thinking text, or the ``"XXXXX"`` sentinel).
         """
         # 1. Last <guess>...</guess> match (handles model re-thinks mid-output).
         matches = _GUESS_RE.findall(text)
@@ -282,8 +288,18 @@ class WordleQwenPolicy(nn.Module):
             cand = _NON_ALPHA_RE.sub("", matches[-1]).upper()
             if len(cand) == 5 and cand.isalpha():
                 return cand, True
-        # 2. First 5-letter alphabetic run anywhere in the output.
-        runs = _FIVE_LETTER_RE.findall(text)
+        # 2. First 5-letter alphabetic run *outside* any <think> block. Strip
+        #    closed thinking blocks first, then drop any unclosed tail (the
+        #    model was truncated mid-thought). Also strip residual XML-ish tags
+        #    so the literal word inside e.g. ``<answer>`` isn't part of a 5-run
+        #    that bridges letters and tag punctuation. Without these passes the
+        #    word ``think`` itself becomes the guess, which is the failure mode
+        #    observed on the SFT/RL Wordle checkpoints when ``max_new_tokens``
+        #    is too small to fit a complete thinking trace + ``<guess>`` tag.
+        cleaned = _THINK_CLOSED_RE.sub(" ", text)
+        cleaned = _THINK_UNCLOSED_TAIL_RE.sub(" ", cleaned)
+        cleaned = _TAG_RE.sub(" ", cleaned)
+        runs = _FIVE_LETTER_RE.findall(cleaned)
         if runs:
             return runs[0].upper(), False
         # 3. Sentinel. Env returns "Invalid guess", reward=0, turn consumed -- ES

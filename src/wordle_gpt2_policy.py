@@ -582,24 +582,226 @@ class WordleGPT2Policy(nn.Module):
         h = h.to(self.char_head.weight.dtype)
         return self.char_head(h)
 
+    def _ensure_letter_token_ids(self) -> None:
+        """Lazily precompute the per-letter token-id table used by the cached sampler.
+
+        For each of A–Z we record the token-id sequence the tokenizer produces for the
+        bare letter (``add_special_tokens=False``). Set ``_letter_token_ids_safe=False``
+        if any letter encodes as multiple tokens, in which case the cached sampler
+        falls back to the uncached path. For Qwen/GPT-2-style BPE this is normally a
+        clean 1:1 mapping.
+        """
+        if getattr(self, "_letter_token_ids_safe", None) is not None:
+            return
+        ids_map: Dict[str, int] = {}
+        safe = True
+        for ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+            ids = self.tokenizer(ch, add_special_tokens=False).input_ids
+            if len(ids) == 1:
+                ids_map[ch] = int(ids[0])
+            else:
+                safe = False
+                ids_map[ch] = int(ids[0]) if ids else 0
+        self._letter_token_ids = ids_map
+        self._letter_token_ids_safe = safe
+
+    def _mask_and_sample_letter(
+        self,
+        logits_per_row: torch.Tensor,
+        constraints_list: Sequence[Dict[str, Any]],
+        trie_nodes: List[int],
+        deterministic: bool,
+        pos: int,
+    ) -> List[int]:
+        """Apply trie + feedback masks per row, sample, advance trie. Returns sampled char idx per row."""
+        n = logits_per_row.shape[0]
+        device = logits_per_row.device
+        logits_batch = logits_per_row.clone()
+
+        for i in range(n):
+            constraints = constraints_list[i]
+            feedback_mask = torch.ones(26, dtype=torch.bool, device=device)
+            fixed = constraints["fixed"].get(pos)
+            if fixed is not None:
+                feedback_mask[:] = False
+                feedback_mask[self._letter_to_idx(fixed)] = True
+            else:
+                for blocked in constraints["blocked_pos"][pos]:
+                    feedback_mask[self._letter_to_idx(blocked)] = False
+                for banned in constraints["banned_global"]:
+                    feedback_mask[self._letter_to_idx(banned)] = False
+
+            if self.vocab_trie is not None:
+                trie_mask = self.vocab_trie.valid_children_mask(trie_nodes[i], device=device)
+                combined = feedback_mask & trie_mask
+                self._trie_step_count += 1
+                if not bool(combined.any()):
+                    self._trie_fallback_count += 1
+                    combined = feedback_mask
+            else:
+                combined = feedback_mask
+            logits_batch[i].masked_fill_(~combined, float("-inf"))
+
+        probs = F.softmax(logits_batch, dim=-1)
+        if deterministic:
+            sampled = torch.argmax(probs, dim=-1)
+        else:
+            sampled = torch.distributions.Categorical(probs=probs).sample()
+
+        sampled_list: List[int] = []
+        for i in range(n):
+            ci = int(sampled[i].item())
+            sampled_list.append(ci)
+            if self.vocab_trie is not None:
+                nxt = self.vocab_trie.step(trie_nodes[i], ci)
+                trie_nodes[i] = nxt if nxt >= 0 else self.vocab_trie.root()
+        return sampled_list
+
+    def _encode_cache_friendly_prompt(self, state: WordleState) -> torch.Tensor:
+        """Tokenize the cache-friendly char-mode prompt for one state. Returns a 1D ``input_ids`` tensor.
+
+        The prompt is the base Wordle prompt (``_build_wordle_prompt``) wrapped by the
+        chat template with ``add_generation_prompt=True`` (or just the raw text for
+        non-chat models). Crucially, it does NOT include the ``Current guess prefix:``
+        / ``Predict the next uppercase letter:`` suffix that ``_char_logits_for_partials_batch``
+        uses — that suffix forces the prompt structure to change per character position
+        (preventing KV-cache reuse). Here the partial is implicit in the cached
+        ``past_key_values`` and grows by one letter token per position.
+        """
+        text = _build_wordle_prompt(state, richer_prompt=self.richer_prompt)
+        if self.use_chat_template:
+            if not hasattr(self.tokenizer, "apply_chat_template"):
+                raise RuntimeError(
+                    f"Tokenizer for {self._model_name!r} does not expose apply_chat_template()."
+                )
+            messages = [{"role": "user", "content": text}]
+            enc = self.tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=self.chat_generation_prompt,
+                enable_thinking=False,
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt",
+                truncation=True,
+                max_length=self.max_prompt_length,
+            )
+            ids = enc["input_ids"]
+        else:
+            ids = self.tokenizer(
+                text,
+                return_tensors="pt",
+                truncation=True,
+                max_length=self.max_prompt_length,
+                add_special_tokens=True,
+            ).input_ids
+        return ids[0]  # [T]
+
+    def _cached_init_forward(
+        self, states: Sequence[WordleState]
+    ) -> Tuple[torch.Tensor, Any, torch.Tensor]:
+        """Position-0 forward: tokenize all states, left-pad to max-in-batch, forward with cache.
+
+        Returns ``(logits[n,26], past_key_values, attention_mask[n, T])``. Left-padding
+        ensures every row's last position is index ``T-1``, which makes incremental
+        forwards trivial (each new letter token slots in at position ``T-1+pos``).
+        """
+        device = self.head.weight.device
+        encoded = [self._encode_cache_friendly_prompt(s) for s in states]
+        n = len(encoded)
+        max_T = max(int(t.shape[0]) for t in encoded)
+
+        pad_id = self.tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = self.tokenizer.eos_token_id
+        if pad_id is None:
+            pad_id = 0
+
+        input_ids = torch.full((n, max_T), int(pad_id), dtype=torch.long)
+        attention_mask = torch.zeros((n, max_T), dtype=torch.long)
+        for i, t in enumerate(encoded):
+            T_i = int(t.shape[0])
+            input_ids[i, max_T - T_i :] = t.to(torch.long)
+            attention_mask[i, max_T - T_i :] = 1
+
+        input_ids = input_ids.to(device)
+        attention_mask = attention_mask.to(device)
+
+        forward_kwargs = dict(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+            return_dict=True,
+            use_cache=True,
+        )
+        if self._lm_trainable:
+            out = self.lm(**forward_kwargs)
+        else:
+            with torch.no_grad():
+                out = self.lm(**forward_kwargs)
+
+        last_hidden = _extract_last_hidden_state(out)  # [n, T, H]
+        h = last_hidden[:, -1]  # [n, H]; left-padding => last token is the prompt's last real token
+        h = h.to(self.char_head.weight.dtype)
+        logits = self.char_head(h)  # [n, 26]
+        return logits, out.past_key_values, attention_mask
+
+    def _cached_step_forward(
+        self,
+        new_token_ids: torch.Tensor,
+        past_kv: Any,
+        prev_attn_mask: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Any, torch.Tensor]:
+        """Single-token forward extending the cache. ``new_token_ids`` is ``[n, 1]``.
+
+        Returns ``(logits[n,26], new_past_kv, new_attn_mask[n, T+1])``.
+        """
+        device = self.head.weight.device
+        n = int(new_token_ids.shape[0])
+        new_attn_mask = torch.cat(
+            [prev_attn_mask, torch.ones(n, 1, dtype=prev_attn_mask.dtype, device=device)],
+            dim=1,
+        )
+        forward_kwargs = dict(
+            input_ids=new_token_ids,
+            attention_mask=new_attn_mask,
+            past_key_values=past_kv,
+            output_hidden_states=True,
+            return_dict=True,
+            use_cache=True,
+        )
+        if self._lm_trainable:
+            out = self.lm(**forward_kwargs)
+        else:
+            with torch.no_grad():
+                out = self.lm(**forward_kwargs)
+
+        last_hidden = _extract_last_hidden_state(out)  # [n, 1, H]
+        h = last_hidden[:, -1]  # [n, H]
+        h = h.to(self.char_head.weight.dtype)
+        logits = self.char_head(h)  # [n, 26]
+        return logits, out.past_key_values, new_attn_mask
+
     def sample_words_batch(
         self,
         states: Sequence[WordleState],
         deterministic: bool = False,
         avoid_previous_guesses: bool = True,
     ) -> List[str]:
-        """Char-mode autoregressive sampler that batches the LM forward across ``states``.
+        """Char-mode autoregressive sampler with KV-cache reuse across the 5 character positions.
 
-        At each of the 5 character positions we run a single batched LM forward over all
-        active games (one row per game), apply per-row feedback + trie masks, and sample.
-        That is 5 LM forwards per turn instead of the (n_active * 5) the per-game path would
-        do, which is the only way char-mode rollouts come close to the wall-clock of the
-        word-level head on a GPU.
+        Position 0 runs one full LM forward over the cache-friendly prompt for all
+        ``n`` active games (left-padded, batched). Positions 1–4 each run a single
+        ``[n, 1]`` token forward reusing ``past_key_values`` from position 0. Per-row
+        feedback + trie masks, sampling, and trie-node advancement are unchanged from
+        the previous implementation; only the LM-forward path is restructured.
 
-        ``avoid_previous_guesses=True`` performs a cheap post-sample fixup: if the sampled
-        word matches one of ``state.previous_guesses``, we re-sample once with the same
-        masks. This is best-effort — under near-deterministic policies the same word may
-        recur — and is only meant to avoid trivially wasting a turn on a known guess.
+        Falls back to the uncached path if any uppercase letter encodes as more than
+        one token under the active tokenizer (so cache-token append-once invariant
+        breaks); in that case `_letter_token_ids_safe` will be False.
+
+        ``avoid_previous_guesses=True`` performs a cheap post-sample fixup: if the
+        sampled word matches one of ``state.previous_guesses``, we re-sample once
+        with the same masks.
         """
         if self.action_granularity != "char":
             raise RuntimeError(
@@ -608,6 +810,70 @@ class WordleGPT2Policy(nn.Module):
         n = len(states)
         if n == 0:
             return []
+
+        self._ensure_letter_token_ids()
+        if not self._letter_token_ids_safe:
+            return self._sample_words_batch_uncached(
+                states,
+                deterministic=deterministic,
+                avoid_previous_guesses=avoid_previous_guesses,
+            )
+
+        constraints_list = [self._feedback_constraints(s) for s in states]
+        trie_nodes: List[int] = [
+            self.vocab_trie.root() if self.vocab_trie is not None else -1 for _ in range(n)
+        ]
+        letters_per: List[List[str]] = [[] for _ in range(n)]
+        device = self.head.weight.device
+
+        # Position 0: full forward with cache.
+        logits_p, past_kv, attn_mask = self._cached_init_forward(states)
+        sampled = self._mask_and_sample_letter(
+            logits_p, constraints_list, trie_nodes, deterministic, pos=0
+        )
+        for i in range(n):
+            letters_per[i].append(self._idx_to_letter(sampled[i]))
+
+        # Positions 1–4: incremental single-token forwards reusing the cache.
+        for pos in range(1, 5):
+            tok_ids = torch.tensor(
+                [self._letter_token_ids[letters_per[i][-1]] for i in range(n)],
+                dtype=torch.long,
+                device=device,
+            ).unsqueeze(1)  # [n, 1]
+            logits_p, past_kv, attn_mask = self._cached_step_forward(tok_ids, past_kv, attn_mask)
+            sampled = self._mask_and_sample_letter(
+                logits_p, constraints_list, trie_nodes, deterministic, pos=pos
+            )
+            for i in range(n):
+                letters_per[i].append(self._idx_to_letter(sampled[i]))
+
+        words: List[str] = []
+        for i in range(n):
+            constraints = constraints_list[i]
+            word = self._post_sample_fixup(letters_per[i], constraints)
+            if (
+                avoid_previous_guesses
+                and word in (states[i].previous_guesses or [])
+            ):
+                alt = self._sample_alt_word(states[i], constraints, exclude={word}, deterministic=deterministic)
+                if alt is not None:
+                    word = alt
+            if self.vocab_trie is not None and word not in self.word_to_idx:
+                self._trie_oov_word_count += 1
+            words.append(word)
+        return words
+
+    def _sample_words_batch_uncached(
+        self,
+        states: Sequence[WordleState],
+        deterministic: bool = False,
+        avoid_previous_guesses: bool = True,
+    ) -> List[str]:
+        """Legacy uncached 5-position sampler. Used as the fallback when the tokenizer
+        produces multi-token uppercase letters (which breaks the cache-token append
+        invariant). Behaviorally identical to the pre-KV-cache implementation."""
+        n = len(states)
         constraints_list = [self._feedback_constraints(s) for s in states]
         trie_nodes: List[int] = [
             self.vocab_trie.root() if self.vocab_trie is not None else -1 for _ in range(n)
@@ -616,45 +882,12 @@ class WordleGPT2Policy(nn.Module):
 
         for pos in range(5):
             partials = ["".join(letters_per[i]) for i in range(n)]
-            logits_batch = self._char_logits_for_partials_batch(states, partials).clone()  # [n, 26]
-            device = logits_batch.device
-
+            logits_batch = self._char_logits_for_partials_batch(states, partials)
+            sampled = self._mask_and_sample_letter(
+                logits_batch, constraints_list, trie_nodes, deterministic, pos=pos
+            )
             for i in range(n):
-                constraints = constraints_list[i]
-                feedback_mask = torch.ones(26, dtype=torch.bool, device=device)
-                fixed = constraints["fixed"].get(pos)
-                if fixed is not None:
-                    feedback_mask[:] = False
-                    feedback_mask[self._letter_to_idx(fixed)] = True
-                else:
-                    for blocked in constraints["blocked_pos"][pos]:
-                        feedback_mask[self._letter_to_idx(blocked)] = False
-                    for banned in constraints["banned_global"]:
-                        feedback_mask[self._letter_to_idx(banned)] = False
-
-                if self.vocab_trie is not None:
-                    trie_mask = self.vocab_trie.valid_children_mask(trie_nodes[i], device=device)
-                    combined = feedback_mask & trie_mask
-                    self._trie_step_count += 1
-                    if not bool(combined.any()):
-                        self._trie_fallback_count += 1
-                        combined = feedback_mask
-                else:
-                    combined = feedback_mask
-                logits_batch[i].masked_fill_(~combined, float("-inf"))
-
-            probs = F.softmax(logits_batch, dim=-1)
-            if deterministic:
-                sampled = torch.argmax(probs, dim=-1)
-            else:
-                sampled = torch.distributions.Categorical(probs=probs).sample()
-
-            for i in range(n):
-                ci = int(sampled[i].item())
-                letters_per[i].append(self._idx_to_letter(ci))
-                if self.vocab_trie is not None:
-                    nxt = self.vocab_trie.step(trie_nodes[i], ci)
-                    trie_nodes[i] = nxt if nxt >= 0 else self.vocab_trie.root()
+                letters_per[i].append(self._idx_to_letter(sampled[i]))
 
         words: List[str] = []
         for i in range(n):

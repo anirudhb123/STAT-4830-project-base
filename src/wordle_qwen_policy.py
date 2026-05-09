@@ -56,6 +56,45 @@ _NON_ALPHA_RE = re.compile(r"[^A-Za-z]")
 _THINK_CLOSED_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
 _THINK_UNCLOSED_TAIL_RE = re.compile(r"<think>.*$", re.IGNORECASE | re.DOTALL)
 _TAG_RE = re.compile(r"</?\s*[A-Za-z][A-Za-z0-9_-]*\s*>")
+# Common English 5-grams that appear in “reasoning” text but are useless as Wordle guesses
+# when they beat a real word as the *first* _FIVE_LETTER_RE match.
+_FALLBACK_SKIP: frozenset[str] = frozenset(
+    {
+        "ABOUT",
+        "AFTER",
+        "AGAIN",
+        "BEING",
+        "COULD",
+        "EVERY",
+        "FIRST",
+        "GUESS",
+        "HAVEN",
+        "MONTH",
+        "NEVER",
+        "OTHER",
+        "PLANS",
+        "PLAYI",  # “playing” fragment when tokenizer splits oddly — rarely 5
+        "SHALL",
+        "SHOULD",
+        "SINCE",
+        "STILL",
+        "THANK",
+        "THEIR",
+        "THERE",
+        "THESE",
+        "THING",
+        "THINK",
+        "THOSE",
+        "THREE",
+        "UNDER",
+        "UNTIL",
+        "WHATS",
+        "WHERE",
+        "WHICH",
+        "WOULD",
+        "WRITE",
+    }
+)
 
 
 def _build_wordle_prompt(state: WordleState, richer_prompt: bool = True) -> str:
@@ -301,7 +340,23 @@ class WordleQwenPolicy(nn.Module):
         cleaned = _TAG_RE.sub(" ", cleaned)
         runs = _FIVE_LETTER_RE.findall(cleaned)
         if runs:
-            return runs[0].upper(), False
+            upper_runs = [r.upper() for r in runs]
+            # Prefer a 5-letter span that is an actual Wordle solution word
+            # (reversed first — models often state the proposed guess last).
+            for r in reversed(upper_runs):
+                if r in self.word_to_idx:
+                    return r, False
+            for r in upper_runs:
+                if r in self.word_to_idx:
+                    return r, False
+            # Skip common reasoning fragments; then prefer a later token (guess-like).
+            for r in reversed(upper_runs):
+                if r not in _FALLBACK_SKIP:
+                    return r, False
+            for r in upper_runs:
+                if r not in _FALLBACK_SKIP:
+                    return r, False
+            return upper_runs[-1], False
         # 3. Sentinel. Env returns "Invalid guess", reward=0, turn consumed -- ES
         #    sees this perturbation as low-fitness and learns to avoid it.
         return "XXXXX", False

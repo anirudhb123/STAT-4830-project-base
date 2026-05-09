@@ -473,14 +473,17 @@ class WordleGPT2Policy(nn.Module):
                 for banned in constraints["banned_global"]:
                     feedback_mask[self._letter_to_idx(banned)] = False
 
-            # 2) Combine with trie mask if available; fall back to feedback-only on empty intersection.
+            # 2) Combine with trie mask if available; on empty intersection, drop the
+            # feedback heuristic and keep the trie so we still emit a real vocabulary
+            # word (legal Wordle guess) — better to waste a turn on an info-violating
+            # word than to walk off-trie and emit an OOV string the env will reject.
             if self.vocab_trie is not None:
                 trie_mask = self.vocab_trie.valid_children_mask(trie_node, device=device)
                 combined = feedback_mask & trie_mask
                 self._trie_step_count += 1
                 if not bool(combined.any()):
                     self._trie_fallback_count += 1
-                    combined = feedback_mask
+                    combined = trie_mask
             else:
                 combined = feedback_mask
 
@@ -637,7 +640,7 @@ class WordleGPT2Policy(nn.Module):
                 self._trie_step_count += 1
                 if not bool(combined.any()):
                     self._trie_fallback_count += 1
-                    combined = feedback_mask
+                    combined = trie_mask
             else:
                 combined = feedback_mask
             logits_batch[i].masked_fill_(~combined, float("-inf"))

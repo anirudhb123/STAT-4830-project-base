@@ -7,3 +7,6 @@ models/wordle_qwen_es_head.*.pt
 .agent-xdg
 .claude/
 .cursor_tmp/
+runs/week16_es/
+logs/week16_es-*.out
+logs/week16_es-*.err

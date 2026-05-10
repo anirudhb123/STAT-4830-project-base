@@ -141,8 +141,10 @@ def main() -> None:
 
     # === Hyperparameters (mirror notebook §2) =================================
     SEED = 42
-    MODEL_SFT = "PrimeIntellect/Qwen3-1.7B-Wordle-SFT"
+    # ES optimizes LoRA on top of this base checkpoint (RL fine-tune, not SFT).
+    MODEL_SFT = "PrimeIntellect/Qwen3-1.7B-Wordle-SFT"  # reference / ceiling comparisons
     MODEL_RL_REF = "PrimeIntellect/Qwen3-1.7B-Wordle-RL"
+    MODEL_ES_BASE = MODEL_RL_REF
 
     MAX_PROMPT_LENGTH = 1024
     ENABLE_THINKING = True
@@ -175,7 +177,8 @@ def main() -> None:
     WIN_FITNESS_SCALE = 8.0
     PER_ITER_SECRET_SUBSET_SIZE = 8
     TRACK_BEST_ITER = True
-    RESTORE_BEST_ON_FINISH = False
+    # Last iterate can be worse than an earlier peak (see prior run: best 12.5% vs final 0%).
+    RESTORE_BEST_ON_FINISH = True
 
     RL_ceiling = float("nan")
     SFT_cold = float("nan")
@@ -197,6 +200,7 @@ def main() -> None:
     if artifacts_base is not None:
         _log(f"[week16_es] artifacts_dir={artifacts_base}")
     _log(f"[week16_es] device={DEVICE} model_load_kwargs={MODEL_LOAD_KWARGS or 'float32'}")
+    _log(f"[week16_es] MODEL_ES_BASE={MODEL_ES_BASE}")
     if torch.cuda.is_available():
         _log(f"[week16_es] cuda_device={torch.cuda.get_device_name(0)}")
 
@@ -207,7 +211,7 @@ def main() -> None:
         torch.cuda.manual_seed_all(SEED)
 
     policy = WordleQwenPolicy(
-        model_name=MODEL_SFT,
+        model_name=MODEL_ES_BASE,
         max_prompt_length=MAX_PROMPT_LENGTH,
         enable_thinking=ENABLE_THINKING,
         max_new_tokens=MAX_NEW_TOKENS,
@@ -454,7 +458,7 @@ def main() -> None:
         axes[3, 2].grid(True, alpha=0.3)
 
         plt.suptitle(
-            f"Wordle ES on SFT | {MODEL_SFT} | LoRA r={LORA_R} | thinking={ENABLE_THINKING}"
+            f"Wordle ES on RL base | {MODEL_ES_BASE} | LoRA r={LORA_R} | thinking={ENABLE_THINKING}"
         )
         plt.tight_layout()
         fig.savefig(plot_path_resolved, dpi=150)
@@ -511,6 +515,7 @@ def main() -> None:
                     "hparams": {
                         "MODEL_SFT": MODEL_SFT,
                         "MODEL_RL_REF": MODEL_RL_REF,
+                        "MODEL_ES_BASE": MODEL_ES_BASE,
                         "LORA_R": LORA_R,
                         "N_POP": N_POP,
                         "N_ITER": N_ITER,

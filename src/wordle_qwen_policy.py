@@ -1,6 +1,6 @@
 """
 Generation-based Wordle policy for week16+. Wraps a HF causal LM
-(default: ``PrimeIntellect/Qwen3-1.7B-Wordle-SFT``) with LoRA, produces guesses
+(default: ``PrimeIntellect/Qwen3-1.7B-Wordle-RL``) with LoRA, produces guesses
 by calling ``model.generate(...)`` and parsing ``<guess>WORD</guess>`` from the
 output. Designed to plug into the existing ES infrastructure in
 ``src/es_wordle.py`` without modifying that module.
@@ -8,7 +8,7 @@ output. Designed to plug into the existing ES infrastructure in
 Differences vs ``WordleGPT2Policy``:
 - No ``char_head`` / fresh letter classifier; Qwen's pretrained ``lm_head`` produces
   the actual generation distribution.
-- No ``vocab_trie`` and no per-position feedback masks; the SFT'd model is trusted
+- No ``vocab_trie`` and no per-position feedback masks; the Wordle-tuned LM is trusted
   to emit valid Wordle words and follow feedback. Bad emissions waste a turn at
   zero reward (env-level penalty).
 - Action space is whatever the LM tokenizer produces; the trainable parameters
@@ -155,7 +155,7 @@ class WordleQwenPolicy(nn.Module):
 
     def __init__(
         self,
-        model_name: str = "PrimeIntellect/Qwen3-1.7B-Wordle-SFT",
+        model_name: str = "PrimeIntellect/Qwen3-1.7B-Wordle-RL",
         max_prompt_length: int = 512,
         enable_thinking: bool = False,
         max_new_tokens: int = 64,
@@ -408,7 +408,7 @@ class WordleQwenPolicy(nn.Module):
                 self._oov_words += 1
             if avoid_previous_guesses and word in (states[i].previous_guesses or []):
                 # Rare-path fallback: pick the first answer-pool word the agent
-                # hasn't tried yet. A well-trained SFT shouldn't need this.
+                # hasn't tried yet. A well-trained checkpoint shouldn't need this.
                 alt = next(
                     (w for w in self.words if w not in (states[i].previous_guesses or [])),
                     None,
@@ -430,7 +430,7 @@ class WordleQwenPolicy(nn.Module):
         word = self.sample_words_batch([state], deterministic=deterministic)[0]
         turn = state.turn_number + 1
         if turn == 1:
-            think = f"Using SFT prior, opening with {word}."
+            think = f"Using base policy prior, opening with {word}."
         else:
             think = f"Conditioning on feedback, next guess: {word}."
         xml = f"<think>{think}</think>\n<guess>{word}</guess>"

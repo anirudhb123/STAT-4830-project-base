@@ -2,7 +2,7 @@
 # Run week16 ES under nohup so it keeps going if SSH / Cursor / your laptop dies.
 # The shell exits immediately; Python reparents to init and ignores SIGHUP.
 #
-# From repo root:
+# From repo root (prefers ./.venv/bin/python if it exists):
 #   bash scripts/run_week16_es_nohup.sh
 #   With normalize_gradient (default in run_week16_es.py), --alpha is step size ‖Δθ‖ (~0.05–0.15):
 #   bash scripts/run_week16_es_nohup.sh --skip-alpha-probe --alpha 0.08
@@ -28,7 +28,10 @@ if [[ -x "$ROOT/.venv/bin/python" ]]; then
   PY="$ROOT/.venv/bin/python"
 else
   PY="python3"
+  echo "[week16_es_nohup] WARN: missing .venv/bin/python — using $(command -v python3)." >&2
+  echo "[week16_es_nohup] Fix: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt" >&2
 fi
+echo "[week16_es_nohup] PYTHON=$PY"
 
 skip_art=false
 for arg in "$@"; do
@@ -54,6 +57,7 @@ fi
 if [[ -n "$ART" ]]; then
   CONSOLE="$ART/console.log"
   echo "$$" >"$ART/parent_shell.txt"
+  printf '%s\n' "$PY" >"$ART/interpreter.txt"
 else
   CONSOLE="$ROOT/logs/week16_es_nohup_${STAMP}_$$.log"
 fi

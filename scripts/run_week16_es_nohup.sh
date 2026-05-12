@@ -4,7 +4,8 @@
 #
 # From repo root:
 #   bash scripts/run_week16_es_nohup.sh
-#   bash scripts/run_week16_es_nohup.sh --skip-alpha-probe --alpha 3e-5
+#   With normalize_gradient (default in run_week16_es.py), --alpha is step size ‖Δθ‖ (~0.05–0.15):
+#   bash scripts/run_week16_es_nohup.sh --skip-alpha-probe --alpha 0.08
 #
 # Override output directory:
 #   WEEK16_ARTIFACTS_DIR=/path/to/run bash scripts/run_week16_es_nohup.sh
@@ -58,6 +59,10 @@ else
 fi
 
 export PYTHONUNBUFFERED=1
+
+MPL_FALLBACK="$ROOT/.cache/matplotlib"
+mkdir -p "$MPL_FALLBACK"
+export MPLCONFIGDIR="${MPLCONFIGDIR:-$MPL_FALLBACK}"
 
 nohup "$PY" -u scripts/run_week16_es.py "${CMD_ARGS[@]}" >"$CONSOLE" 2>&1 &
 CHILD_PID=$!

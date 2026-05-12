@@ -918,7 +918,7 @@ def train_es_wordle(
                         f"  Iter | "
                         f"TRAIN: Fit({_fl:>7})  ES_win   popσ   | "
                         f"EVAL ({_ev}): Succ    Rew  Turns | "
-                        f"OPT:    Δθ        |g|      |Δ|     cos | "
+                        f"OPT:  ‖θ−θ₀‖      |g|      |Δ|     cos | "
                         f"SIG:   ess    wins  dprobe     fb%"
                     )
                 print(
@@ -939,7 +939,7 @@ def train_es_wordle(
                     f"  Iter | "
                     f"TRAIN: Fit({_fl:>7})  ES_win   popσ   | "
                     f"EVAL: (skipped)              | "
-                    f"OPT:    Δθ        |g|      |Δ|     cos | "
+                    f"OPT:  ‖θ−θ₀‖      |g|      |Δ|     cos | "
                     f"SIG:   ess    wins             fb%"
                 )
             print(

@@ -11,7 +11,7 @@ Usage (repo root, log everything)::
 
 Skip the expensive ALPHA probe (set learning rate explicitly)::
 
-    .venv/bin/python -u scripts/run_week16_es.py --skip-alpha-probe --alpha 3e-5 2>&1 | tee logs/week16_es.log
+    .venv/bin/python -u scripts/run_week16_es.py --skip-alpha-probe --alpha 0.09 2>&1 | tee logs/week16_es.log
 
 Optional: ``bash scripts/run_week16_es_tmux.sh`` starts a tmux session and tees to
 ``logs/week16_es_<timestamp>.log`` automatically.
@@ -35,7 +35,17 @@ import os
 import pickle
 import random
 import sys
+import tempfile
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+_mpl_conf = ROOT / ".cache" / "matplotlib"
+try:
+    _mpl_conf.mkdir(parents=True, exist_ok=True)
+except OSError:
+    _mpl_conf = Path(tempfile.gettempdir()) / "matplotlib-week16-es"
+    _mpl_conf.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", str(_mpl_conf.resolve()))
 
 import matplotlib
 
@@ -44,7 +54,6 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
-ROOT = Path(__file__).resolve().parent.parent
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
@@ -158,20 +167,24 @@ def main() -> None:
     CAST_LORA_TO_FP32 = True
 
     N_POP = 8
-    N_ITER = 15
+    N_ITER = 25
     N_EVAL_EPISODES = 8
-    EVAL_N_EPISODES = 16
+    # Greedy periodic eval — was 16 (6.25% resolution); 32 halves sampling noise (~3%/win).
+    EVAL_N_EPISODES = 32
     EVAL_EVERY = 1
-    PROBE_N_EPISODES = 8
+    PROBE_N_EPISODES = 12
     MAX_TURNS = 6
     SIGMA = 0.02
     ALPHA: float | None = args.alpha if args.alpha is not None else None
-    NORMALIZE_GRADIENT = False
+    # Raw ES applies θ ← θ + α·ĝ; ‖ĝ‖ on ~1–2M LoRA dims spikes across iters → ‖α·ĝ‖ explosions.
+    # Normalized θ ← θ + α·ĝ/‖ĝ‖ fixes step size ‖Δθ‖=α each iter (ALPHA probe sets α ≈ step target).
+    NORMALIZE_GRADIENT = True
     RANK_FITNESS = True
     BASELINE_SUBTRACT = True
     ANTITHETIC = True
     COMMON_RANDOM_NUMBERS = True
-    EMA_BETA = 0.0
+    # Low-pass on ĝ estimates (bias-corrected in train_es_wordle); damps iterate-to-iterate ES noise.
+    EMA_BETA = 0.12
     EVAL_DETERMINISTIC = True
     FITNESS_OBJECTIVE = "win_plus_return"
     WIN_FITNESS_SCALE = 8.0
@@ -279,17 +292,35 @@ def main() -> None:
                 raise RuntimeError(
                     "ALPHA probe ‖ĝ‖ ≈ 0 — check generation/parsing or try --skip-alpha-probe --alpha ..."
                 )
-            _suggested_alpha = float(_target_step / _g_norm)
+            if NORMALIZE_GRADIENT:
+                # Update is α·ĝ/‖ĝ‖ ⇒ per-iter ‖Δθ‖ = α; ‖ĝ‖ is diagnostic only here.
+                _suggested_alpha = float(_target_step)
+            else:
+                _suggested_alpha = float(_target_step / _g_norm)
             if ALPHA is None:
                 ALPHA = _suggested_alpha
-                _action = f"  AUTO ALPHA = {ALPHA:.2e}  (initial step ≈ {_target_step})"
+                _action = f"  AUTO ALPHA = {ALPHA:.2e}"
             else:
-                _action = f"  manual ALPHA = {ALPHA:.2e}  (calibrator suggested {_suggested_alpha:.2e})"
-            _implied_step = ALPHA * _g_norm
+                _action = (
+                    f"  manual ALPHA = {ALPHA:.2e} "
+                    f"(calibrator suggested {_suggested_alpha:.2e})"
+                )
+            if NORMALIZE_GRADIENT:
+                _implied_step = float(ALPHA)
+            else:
+                _implied_step = ALPHA * _g_norm
+            _step_line = (
+                f"  ‖Δθ‖ per ES step = {_implied_step:.4g}   (normalized updates; "
+                f"target ≈ {_target_step})\n"
+                if NORMALIZE_GRADIENT
+                else (
+                    f"  ALPHA * ‖ĝ‖       = {_implied_step:.4g}   (target ≈ {_target_step})\n"
+                )
+            )
             _log(
                 f"\n[ALPHA calibration @ init, trainable={policy.count_trainable_parameters():,}]\n"
                 f"  raw ‖ĝ‖           = {_g_norm:.4g}\n"
-                f"  ALPHA * ‖ĝ‖       = {_implied_step:.4g}   (target ≈ {_target_step})\n"
+                f"{_step_line}"
                 f"  ES probe avg_fit  = {_avg_fit:+.3f}   ES_win = {_avg_win:.1%}   popσ = {_pop_std:.4f}\n"
                 f"  ES signal probes  = ess_rank {_ess_rank}/{N_POP}, wins {_win_count}/{N_POP}\n"
                 f"{_action}"
@@ -308,8 +339,18 @@ def main() -> None:
     else:
         assert ALPHA is not None
         _log(f"[week16_es] skipped ALPHA probe; using ALPHA={ALPHA:.2e}")
+        if NORMALIZE_GRADIENT:
+            _log(
+                "[week16_es] hint: with normalize_gradient=True, ‖Δθ‖=ALPHA each iter "
+                "(typical range ~5e-2–2e-1)."
+            )
 
     assert ALPHA is not None
+    _log(
+        f"[week16_es] NORMALIZE_GRADIENT={NORMALIZE_GRADIENT}  EMA_BETA={EMA_BETA}  "
+        f"N_ITER={N_ITER}  SIGMA={SIGMA}  train_ep/perturb={N_EVAL_EPISODES}  "
+        f"eval_ep={EVAL_N_EPISODES}"
+    )
 
     _log("[week16_es] starting train_es_wordle ...")
     history = train_es_wordle(
@@ -346,19 +387,33 @@ def main() -> None:
     best_raw = history.get("best_eval_success")
     best_eval_success = float(best_raw[0]) if best_raw else float("nan")
     best_iter = int(history["best_iter"][0]) if history.get("best_iter") else -1
+    # With restore_best_on_finish, saved weights = best checkpoint; last-iter eval is high-variance
+    # (EVAL_N_EPISODES greedy games), not the headline for the adapter on disk.
+    exported_matches_best = bool(
+        RESTORE_BEST_ON_FINISH
+        and np.isfinite(best_eval_success)
+        and best_iter >= 0
+    )
+    _exported_eval = best_eval_success if exported_matches_best else final_eval_success
 
     _lines = [
         f"\n=== ES finished ===\n",
-        f"  final eval_success  : {final_eval_success:.1%}\n",
-        f"  best  eval_success  : {best_eval_success:.1%} (iter {best_iter})\n",
+        (
+            "  NOTE: Exported LoRA = best-so-far checkpoint when restore_best_on_finish=True; "
+            "last checkpoint % is greedy eval variance (EVAL_N_EPISODES games).\n"
+            if exported_matches_best
+            else ""
+        ),
+        f"  last checkpoint eval_success (iter {N_ITER - 1}) : {final_eval_success:.1%}\n",
+        f"  best greedy eval_seen (iter {best_iter})        : {best_eval_success:.1%}\n",
     ]
     if np.isfinite(SFT_cold):
         _lines.append(
-            f"  ES contribution     : {(final_eval_success - SFT_cold):+.1%}  (final − SFT_cold)\n"
+            f"  ES contribution (exported − SFT_cold) : {(_exported_eval - SFT_cold):+.1%}\n"
         )
     if np.isfinite(RL_ceiling):
         _lines.append(
-            f"  Gap to RL ceiling   : {(RL_ceiling - final_eval_success):+.1%}  (RL_ceiling − final)\n"
+            f"  Gap to RL ceiling (ceiling − exported) : {(RL_ceiling - _exported_eval):+.1%}\n"
         )
     _log("".join(_lines))
 
@@ -371,7 +426,9 @@ def main() -> None:
 
         fig, axes = plt.subplots(4, 3, figsize=(16, 12), sharex=False)
 
-        axes[0, 0].plot(it, history.get("eval_success", []), "g-o", ms=3)
+        axes[0, 0].plot(
+            it, history.get("eval_success", []), "g-o", ms=3, label="eval success"
+        )
         if np.isfinite(SFT_cold):
             axes[0, 0].axhline(
                 SFT_cold, color="gray", ls=":", lw=0.9, label=f"SFT_cold={SFT_cold:.1%}"
@@ -383,7 +440,9 @@ def main() -> None:
         axes[0, 0].set_title("Eval success rate")
         axes[0, 0].set_xlabel("iteration")
         axes[0, 0].set_ylim(0, 1.05)
-        axes[0, 0].legend(loc="lower right", fontsize=7)
+        _leg_h, leg_l = axes[0, 0].get_legend_handles_labels()
+        if any(leg_l):
+            axes[0, 0].legend(loc="lower right", fontsize=7)
         axes[0, 0].grid(True, alpha=0.3)
 
         axes[0, 1].plot(it, history.get("eval_reward", []), "b-o", ms=3)
@@ -467,10 +526,10 @@ def main() -> None:
 
     # === Summary + save (mirror notebook §5) ================================
     es_contribution = (
-        final_eval_success - SFT_cold if np.isfinite(SFT_cold) else float("nan")
+        _exported_eval - SFT_cold if np.isfinite(SFT_cold) else float("nan")
     )
     gap_to_ceiling = (
-        RL_ceiling - final_eval_success if np.isfinite(RL_ceiling) else float("nan")
+        RL_ceiling - _exported_eval if np.isfinite(RL_ceiling) else float("nan")
     )
 
     _log("=" * 60)
@@ -480,15 +539,25 @@ def main() -> None:
     _sft = f"{SFT_cold:>6.1%}" if np.isfinite(SFT_cold) else "   n/a"
     _log(f"  RL_ceiling (their full pipeline) : {_rl}")
     _log(f"  SFT_cold   (start of ES)         : {_sft}")
-    _log(f"  SFT + ES   (final)               : {final_eval_success:>6.1%}")
-    _log(f"  SFT + ES   (best iter {best_iter:>3d})        : {best_eval_success:>6.1%}")
+    _log(
+        f"  SFT + ES   (exported adapter %)   : {_exported_eval:>6.1%}"
+        + ("  (= best_seen; restored before save)" if exported_matches_best else "")
+    )
+    _log(
+        f"  SFT + ES   (best_seen @ iter {best_iter:>3d})     : {best_eval_success:>6.1%}"
+    )
+    _log(f"  SFT + ES   (last checkpoint %)   : {final_eval_success:>6.1%}")
     _log("-" * 60)
     if np.isfinite(es_contribution):
-        _log(f"  ES contribution                  : {es_contribution:+6.1%}  (final − SFT_cold)")
+        _log(
+            f"  ES contribution                  : {es_contribution:+6.1%}  (exported − SFT_cold)"
+        )
     else:
         _log("  ES contribution                  : n/a")
     if np.isfinite(gap_to_ceiling):
-        _log(f"  Gap to ceiling                   : {gap_to_ceiling:+6.1%}  (RL_ceiling − final)")
+        _log(
+            f"  Gap to ceiling                   : {gap_to_ceiling:+6.1%}  (RL_ceiling − exported)"
+        )
     else:
         _log("  Gap to ceiling                   : n/a")
     _log("=" * 60)
@@ -510,6 +579,8 @@ def main() -> None:
                     "RL_ceiling": RL_ceiling,
                     "SFT_cold": SFT_cold,
                     "final_eval_success": final_eval_success,
+                    "exported_eval_success": _exported_eval,
+                    "restore_best_weights_match_best_seen": exported_matches_best,
                     "best_eval_success": best_eval_success,
                     "best_iter": best_iter,
                     "hparams": {
@@ -519,11 +590,15 @@ def main() -> None:
                         "LORA_R": LORA_R,
                         "N_POP": N_POP,
                         "N_ITER": N_ITER,
+                        "N_EVAL_EPISODES": N_EVAL_EPISODES,
+                        "EVAL_N_EPISODES": EVAL_N_EPISODES,
                         "SIGMA": SIGMA,
                         "ALPHA": ALPHA,
+                        "EMA_BETA": EMA_BETA,
                         "ENABLE_THINKING": ENABLE_THINKING,
                         "MAX_NEW_TOKENS": MAX_NEW_TOKENS,
                         "PER_ITER_SECRET_SUBSET_SIZE": PER_ITER_SECRET_SUBSET_SIZE,
+                        "NORMALIZE_GRADIENT": NORMALIZE_GRADIENT,
                     },
                 },
                 f,

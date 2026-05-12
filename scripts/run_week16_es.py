@@ -167,12 +167,11 @@ def main() -> None:
     CAST_LORA_TO_FP32 = True
 
     N_POP = 8
-    N_ITER = 25
+    N_ITER = 15
     N_EVAL_EPISODES = 8
-    # Greedy periodic eval — was 16 (6.25% resolution); 32 halves sampling noise (~3%/win).
-    EVAL_N_EPISODES = 32
+    EVAL_N_EPISODES = 16
     EVAL_EVERY = 1
-    PROBE_N_EPISODES = 12
+    PROBE_N_EPISODES = 8
     MAX_TURNS = 6
     SIGMA = 0.02
     ALPHA: float | None = args.alpha if args.alpha is not None else None
@@ -183,8 +182,7 @@ def main() -> None:
     BASELINE_SUBTRACT = True
     ANTITHETIC = True
     COMMON_RANDOM_NUMBERS = True
-    # Low-pass on ĝ estimates (bias-corrected in train_es_wordle); damps iterate-to-iterate ES noise.
-    EMA_BETA = 0.12
+    EMA_BETA = 0.0
     EVAL_DETERMINISTIC = True
     FITNESS_OBJECTIVE = "win_plus_return"
     WIN_FITNESS_SCALE = 8.0

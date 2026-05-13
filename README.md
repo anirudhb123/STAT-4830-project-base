@@ -4,12 +4,12 @@ This repository is set up to run on macOS, Linux, and Windows using `uv`.
 
 ## STAT 4830 final project
 
-- **Written report:** [`docs/reports/week16.md`](docs/reports/week16.md)
-- **Slides:** [`docs/slides/4830_slides_draft_5.pdf`](docs/slides/4830_slides_draft_5.pdf) (latest numbered export), [`docs/slides/lightning_talk.pdf`](docs/slides/lightning_talk.pdf), and outline/copy deck [`docs/presentation_slides.md`](docs/presentation_slides.md)
+- **Written report:** [`docs/reports/week16.md`](docs/reports/week16.md) # REPLACE WITH OVERLEAF REPORT WHEN DONE
+- **Slides:** [`docs/presentation_slides.md`](docs/presentation_slides.md)
 - **Main reproducible artifact:** [`notebooks/week16_wordle_es_qwen.ipynb`](notebooks/week16_wordle_es_qwen.ipynb)
-- **Headless parity:** [`scripts/run_week16_es.py`](scripts/run_week16_es.py) (same ES loop as the notebook; see docstring for `tmux` / `nohup` wrappers)
+- **Script for training from a GPU server (no notebook):** [`scripts/run_week16_es.py`](scripts/run_week16_es.py) — same ES loop as the notebook for long unattended runs.
 
-### Executable demo (notebook / Colab-equivalent)
+### Executable demo
 
 The graded demo path is **`notebooks/week16_wordle_es_qwen.ipynb`**: register the repo’s `.venv` as a Jupyter kernel (see [`AGENTS.md`](AGENTS.md)), open the notebook, use a **GPU** runtime (`torch.cuda.is_available()` should be `True`), and run cells in order through training and plots. To use **Google Colab**, upload the notebook or open it from a mounted GitHub copy, enable a GPU runtime (**Runtime → Change runtime type**), paste a Hugging Face **read** token when the notebook/environment needs Hub access (`hf auth login` in an initial `!pip` cell works on Colab), and rerun from the top. Full ES training is slow without a decent GPU because of repeated `model.generate` calls.
 
@@ -19,7 +19,7 @@ The graded demo path is **`notebooks/week16_wordle_es_qwen.ipynb`**: register th
 2. Install/upgrade tooling the notebook relies on if missing: **`jinja2>=3.1.0`** for Qwen chat templates (`python -m pip install -U "jinja2>=3.1.0"`). Optional: `peft`, `ipykernel`.
 3. **Hugging Face:** complete the **[Hugging Face](#hugging-face-gated-models--login)** steps. For Week 16, accept access on the Hub for the checkpoints you actually load (typically **`PrimeIntellect/Qwen3-1.7B-Wordle-SFT`** and **`PrimeIntellect/Qwen3-1.7B-Wordle-RL`**, and any base routing checkpoint such as **`Qwen/Qwen3-1.7B`** if `from_pretrained` pulls it—use the exact IDs from notebook section 2 / the report). Downloads fail with **403** if the license step was skipped on the logged-in account.
 4. Run **`notebooks/week16_wordle_es_qwen.ipynb`** from top to bottom in that environment.
-5. **Optional headless run** (mirrors the notebook driver; edit `MODEL_ES_BASE`, `NORMALIZE_GRADIENT`, and related constants in [`scripts/run_week16_es.py`](scripts/run_week16_es.py) to match the run you want, as in [`docs/reports/week16.md`](docs/reports/week16.md)):
+5. **Optional CLI run on a GPU** (mirrors the notebook driver; edit `MODEL_ES_BASE`, `NORMALIZE_GRADIENT`, and related constants in [`scripts/run_week16_es.py`](scripts/run_week16_es.py) to match the run you want, as in [`docs/reports/week16.md`](docs/reports/week16.md)):
 
 ```bash
 mkdir -p logs
@@ -144,7 +144,7 @@ Never commit tokens, never paste them into Discord/slack as screenshots of termi
 - `scripts/quickstart_wordle.py`: Quick demo of the Wordle environment + discrete policy (mock mode); runs a short interaction and a full episode without training.
 - `scripts/run_wordle_comparison.py`: Runs an end-to-end ES vs PPO comparison on Wordle, saves plots to `figures/` and trained weights to `models/`.
 - `scripts/run_es_signal_density_probe.py`, `scripts/run_experiment1_closed_loop.py`, `scripts/run_experiment2_minibatch_crn.py`: Headless mirrors of week-12 LoRA notebook cells used to characterize the ES signal-density bottleneck.
-- `scripts/run_week16_es.py` (+ `run_week16_es_{nohup,tmux,detached}.sh`, `scripts/slurm/week16_es.sbatch`): Headless ES (Qwen + LoRA) training driver with disconnect-safe launchers.
+- `scripts/run_week16_es.py` (+ `run_week16_es_{nohup,tmux,detached}.sh`, `scripts/slurm/week16_es.sbatch`): Command-line ES (Qwen + LoRA) trainer for SSH / Slurm GPU nodes, with disconnect-safe launchers.
 
 `src/` modules:
 

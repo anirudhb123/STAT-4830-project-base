@@ -43,7 +43,7 @@ We standardize fitness across the population each iteration to reduce estimator 
 - PPO-Clip objective with ε=0.2
 - Separate optimizers for policy and value networks
 
-**Experimental configuration (from `notebooks/week6_implementation.ipynb`).**
+**Experimental configuration (from `notebooks/week06_wordle_es_vs_ppo.ipynb`).**
 
 
 | Method | Key hyperparameters                                                                 | Episodes / iteration | Total episodes |
@@ -54,7 +54,7 @@ We standardize fitness across the population each iteration to reduce estimator 
 
 Code and artifacts:
 
-- `notebooks/week6_implementation.ipynb` (training + plots)
+- `notebooks/week06_wordle_es_vs_ppo.ipynb` (training + plots)
 - Figures saved under `figures/` (e.g., `wordle_es_ppo_comparison.png`, `wordle_learning_curves.png`)
 - Models saved under `models/` (e.g., `wordle_es_policy.pt`, `wordle_ppo_policy.pt`, `wordle_ppo_value.pt`)
 

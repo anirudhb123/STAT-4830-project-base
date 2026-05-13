@@ -395,7 +395,7 @@ BODY:
 ### BACKUP C — REINFORCE Baseline (work in progress)
 TITLE: REINFORCE vs ES — Current Status
 BODY:
-- REINFORCE baseline is set up in `notebooks/week12_reinforce_gemma.ipynb`
+- REINFORCE baseline is set up in `notebooks/week12_wordle_reinforce_gemma.ipynb`
 - Just aligned its warm-start config to match the ES run (fair comparison)
 - Results not yet rerun on the VM — reported honestly as "open"
 
@@ -486,7 +486,7 @@ compute budget. The properly controlled comparison is still in progress.
 
 - [ ] Team names on title slide (slide 1)
 - [ ] Speaker assignments filled in for all 12 slides
-- [ ] Real plot from `week12_implementation_LoRARun.ipynb` on slide 10 (bar chart)
+- [ ] Real plot from `week12_wordle_es_lora_run.ipynb` on slide 10 (bar chart)
 - [ ] Every plot has labeled axes, a legend, and a one-sentence caption
 - [ ] Export the whole deck to PDF as a **backup** (`File → Download → PDF Document`)
 - [ ] 30-second closing answers written per person

@@ -34,5 +34,5 @@ echo
 echo "Install complete."
 echo "Next steps:"
 echo "  1) Activate venv: source .venv/bin/activate"
-echo "  2) Run script:    python script/gd_1d_torch.py"
+echo "  2) Run script:    python scripts/gd_1d_torch.py"
 echo "  3) Run tests:     pytest"

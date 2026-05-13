@@ -1,15 +1,23 @@
 #!/usr/bin/env python
 """
-Full ES vs PPO comparison on Wordle (matching week4_implementation.ipynb structure).
+Full ES vs PPO comparison on Wordle (matching week04_gridworld_es_vs_ppo.ipynb structure).
 
 This script runs both methods and generates comparison plots.
+
+Run from the repo root so the relative ``figures/`` and ``models/`` write paths
+resolve correctly:
+
+    python scripts/run_wordle_comparison.py
 """
 
 import sys
 import os
-sys.path.append('src')
+from pathlib import Path
 
-# Set NLTK data path
+_SRC = Path(__file__).resolve().parent.parent / 'src'
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
 os.environ['NLTK_DATA'] = os.path.join(os.getcwd(), '.venv', 'nltk_data')
 
 import numpy as np

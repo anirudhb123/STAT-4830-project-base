@@ -65,7 +65,7 @@ Both methods start from the same pretrained checkpoint to ensure fair comparison
 **Code organization.**
 - `src/gridworld.py`: Base `GridWorld`, `PolicyNetwork`, `LoRALinearWrapper`
 - `src/es_gridworld.py`: `train_es` with `param_mode` support, `freeze_base_weights()`
-- `notebooks/week7_implementation.ipynb`: Full experimental pipeline with curriculum
+- `notebooks/week07_gridworld_lora_perturbation.ipynb`: Full experimental pipeline with curriculum
 
 ## Results
 

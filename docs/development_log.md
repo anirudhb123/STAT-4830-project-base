@@ -1,5 +1,238 @@
 # Development Log
 
+## Week 16 (May 8 - May 12, 2026)
+
+### Overview
+Pivoted from "warm-start a generic LM and let ES specialize it on Wordle" (Weeks 10-14) to "take the most-Wordle-trained 1.7B-param checkpoint that exists and ask whether ES adds anything on top." Built `src/wordle_qwen_policy.py` (`WordleQwenPolicy`) — a generation-based policy that wraps Prime Intellect's Qwen3 Wordle checkpoints with LoRA, calls `model.generate(...)`, and parses `<guess>WORD</guess>` with a layered fallback. Ran three production ES configurations end-to-end. Headline result: **all three converged to `final eval_success = 0.0%`, `best eval_success = 12.5%` at iter 1 or 8 — statistically indistinguishable from cold-base eval noise on the 16-secret slate.** This is the project's terminal experiment on small-population ES + LoRA on a Wordle-tuned Qwen3 base.
+
+### Key Decisions
+
+**1. Skip Our Own Warm-Start Entirely**
+- **Decision:** Drop the per-stage supervised warm-start loop (Weeks 11-14) and start ES directly from `PrimeIntellect/Qwen3-1.7B-Wordle-SFT` (or `…-Wordle-RL`).
+- **Rationale:** Three consecutive weeks of "warm-start does the lifting; ES adds noise" had been the consistent pattern. The Wordle-specific SFT/RL checkpoints from Prime Intellect's *Wordle Verifiers* release *are* the warm-start, and they were trained with a real RLHF-scale budget. ES is the only training signal the LoRA adapter ever sees in Week 16.
+- **Consequence:** No more `train_curriculum`, no `wordle_gpt2_warmstart` calls, no `VOCAB_SCHEDULE`. Just `train_es_wordle` on the LoRA adapter against the full 2,315-secret pool with `per_iter_secret_subset_size=8` mini-batch CRN.
+
+**2. Drop Char-Mode Generation; Use `model.generate(...)` with a `<guess>WORD</guess>` Parser**
+- **Decision:** Retire `ACTION_GRANULARITY="char"` (autoregressive 5-letter generation under a vocabulary trie mask, the Week 14 design). Generate end-to-end with `model.generate(...)` and parse `<guess>WORD</guess>` from the output.
+- **Rationale:** Week 14's char-mode result showed persistent 60-90% trie fallback rate across the entire run, meaning the trie mask was redirecting most token emissions and the LM's pre-mask distribution was approximately uninformative. The post-mask sampling distribution had almost no LoRA-controlled gradient surface.
+- **Implementation:** New `src/wordle_qwen_policy.py` (`WordleQwenPolicy`) with three failure-mode handlers in `_parse_word_from_text`:
+  1. Last `<guess>...</guess>` regex match (clean path; never fired in production runs).
+  2. First 5-letter alphabetic run after stripping `<think>...</think>` blocks and residual XML-ish tags. `_FALLBACK_SKIP` denylist (`THINK`, `THERE`, `WHICH`, `SHOULD`, …) prevents common reasoning fragments from beating real words.
+  3. `XXXXX` sentinel — env scores it as `Invalid guess`, reward=0, turn consumed; ES sees the perturbation as low-fitness and avoids it.
+
+**3. Format/Parser Probe Notebook (`notebooks/week16_wordle_es_qwen_sft.ipynb`)**
+- **Decision:** Run a fast probe at `enable_thinking=False`, `MAX_NEW_TOKENS=64` *before* the production runs to surface format-related failure modes.
+- **Result:** **100% parse failure.** The Wordle SFT/RL checkpoints emit `<think>...</think>` blocks regardless of the chat-template flag; the 64-token budget was exhausted inside the thinking opener and the parser never saw `<guess>`.
+- **Lesson learned:** This is exactly the cheap-experiment-first probe Week 14's critique said we needed. It cost ~30 min of compute and immediately ruled out the "compact emission" configuration without the cost of a full ES run. **Production configuration switched to `enable_thinking=True`, `MAX_NEW_TOKENS=512`.**
+
+**4. Bf16 Base + Fp32 LoRA**
+- **Decision:** `cast_lora_to_fp32=True` so the trainable surface is fp32 while the base stays bf16.
+- **Rationale:** At `N_POP=8` and `SIGMA=0.02`, pre-flights showed bf16 antithetic perturbation arithmetic was too coarse to extract a clean signal from a ~1.6M-dim LoRA. The all-bf16 alternative is a roughly 50% memory saving on the trainable params (~3MB vs ~6MB) at the cost of much noisier ES gradients.
+- **Implementation:** `src/wordle_qwen_policy.py` lines ~219-227 — iterate `self.lm.parameters()` post-PEFT-wrap and cast `requires_grad=True` params with `p.data = p.data.float()`. Frozen base parameters are untouched.
+
+**5. Three Production Runs**
+- Run 1 — ES on `…-Wordle-SFT`, raw gradients (`runs/week16_es/sft_base/`).
+- Run 2 — ES on `…-Wordle-RL`, raw gradients (`runs/week16_es/rl_base/`).
+- Run 3 — ES on `…-Wordle-RL`, **normalized gradients** (`NORMALIZE_GRADIENT=True` so `θ ← θ + α · ĝ / ‖ĝ‖`, `‖Δθ‖ = α = 0.13` per step) (`runs/week16_es/rl_base_normed_gradients/`).
+- All three: `N_POP=8`, `N_ITER=15`, `EVAL_N_EPISODES=16`, `MAX_TURNS=6`, `SIGMA=0.02`, `LORA_R=4`, `RESTORE_BEST_ON_FINISH=True`, `RANK_FITNESS=True`, `BASELINE_SUBTRACT=True`, `ANTITHETIC=True`, `COMMON_RANDOM_NUMBERS=True`, `EMA_BETA=0.0`.
+- Why three runs? Run 1 surfaced the SFT-base behavior; Run 2 swapped to the RL base to see if the additional Prime Intellect RL stage created a different local geometry; Run 3 added gradient normalization specifically to remove the `‖ĝ‖` bouncing two orders of magnitude as a confound (Run 2 had per-iter `|g|` ranging 200 → 19,400).
+
+### Results
+
+**All three runs: identical eval-trajectory shape.** Best `eval_success = 12.5%` at an early iteration, oscillation between 0% and 12.5% middle, `final eval_success = 0.0%` at iter 14 (with `RESTORE_BEST_ON_FINISH=True` reloading the iter-1 or iter-8 checkpoint as the exported adapter).
+
+| Run | Base | Normalize Grad | Best Iter | Best Eval Succ | Final Eval Succ | dprobe non-zero | fb% |
+|---|---|---|---|---|---|---|---|
+| 1 | …-Wordle-SFT | False | 8 | 12.5% | 0.0% | 0/15 | 100% |
+| 2 | …-Wordle-RL | False | 1 | 12.5% | 0.0% | 0/15 | 100% |
+| 3 | …-Wordle-RL | True | 1 | 12.5% | 0.0% | 0/15 | 100% |
+
+**12.5% = 2 wins / 16 eval episodes.** Under a Bernoulli null at the cold-base win rate (~6-12% on the same slate per the §2.5 cold-base eval), the 12.5% peak is well inside the 95% CI. We cannot reject the null that the LoRA adapter is doing nothing measurable.
+
+**`fb%` = 100% across all three runs across every iteration.** This is the most informative finding: the layered fallback parser in `_parse_word_from_text` is *always* doing the work — there is not a single clean `<guess>WORD</guess>` emission in any of the ~2,400 generation calls per run. The Wordle-tuned Qwen3 checkpoints, even with `enable_thinking=True` and 512 tokens of generation budget, do not emit responses that match our `<guess>WORD</guess>` regex; the parser is choosing guesses out of the model's reasoning text.
+
+**Run 2 vs Run 3 ablation:** Normalized gradients held `‖Δθ‖` at exactly 0.13 every iteration (vs Run 2's iter-2 spike to `|Δ| = 2.61`). The eval trajectories were essentially identical. The ALPHA / step-size axis is **not** the binding constraint at this base/budget — a real finding given that previous critiques had pointed at step size as the next thing to tune.
+
+### Failed Attempts
+
+**1. `enable_thinking=False`, `MAX_NEW_TOKENS=64` (Pre-production probe)**
+- 100% parse failure. The model exhausted its 64-token budget inside `<think>` and never reached `<guess>`. Documented as the §2.5 probe in `notebooks/week16_wordle_es_qwen_sft.ipynb`.
+- **Lesson:** The Wordle-tuned Qwen3 checkpoints have the `<think>` block baked into their training; flipping the flag does not turn it off. Generation budget must accommodate it.
+
+**2. Run 1 with raw gradients on the SFT base**
+- Run 1's `‖θ−θ₀‖` exploded from 0.13 to 9.42 over 15 iterations (raw gradient `|g|` averaged ~5500). Iter-2's single-step `|Δ| = 2.61` against the calibration target of 0.13 — a 20× overshoot. Best eval 12.5% at iter 8 was a single early lottery; final 0%.
+- This is what motivated Run 3's `NORMALIZE_GRADIENT=True`.
+
+**3. Expecting "best eval_success" to mean what it normally means**
+- All three runs print "best eval_success = 12.5%" prominently in the FINAL ATTRIBUTION block. With `RESTORE_BEST_ON_FINISH=True` the exported adapter *is* the best-iter checkpoint. The temptation to read this as "ES found a +6pp lift" is strong and wrong: the cold-base eval on the same slate is 6-12% greedy, and 2 wins out of 16 episodes is inside the noise band.
+- **Lesson:** The FINAL ATTRIBUTION block needs an "ES contribution" line that subtracts the cold-base eval under the same RNG stream. Today it prints `n/a` because the cold and ES evals use different RNG streams. Fix in next iteration.
+
+### Code Changes
+
+- `src/wordle_qwen_policy.py` (new, ~450 LoC): `WordleQwenPolicy` class. Wraps `AutoModelForCausalLM` + LoRA + chat template + `model.generate(...)` + layered `<guess>` parser. Implements the ES-required `forward_logits_batch` zeros stub (see `es_wordle.py` `hasattr` gate), `sample_words_batch`, `format_action_xml`, `get_action`, and the `trie_stats`/`reset_trie_stats` hooks repurposed as a parse-failure-rate counter for the verbose log.
+- `scripts/run_week16_es.py` (new, ~410 LoC): headless equivalent of the Week 16 production notebook, `--artifacts-dir` for Slurm/nohup-friendly persistence, `--skip-alpha-probe` + `--alpha` for re-running with a known-good ALPHA, `--no-plots` for log-only runs.
+- `notebooks/week16_wordle_es_qwen.ipynb` (new): the headline `enable_thinking=True`, `MAX_NEW_TOKENS=512` notebook.
+- `notebooks/week16_wordle_es_qwen_sft.ipynb` (new): the format/parser probe notebook (`enable_thinking=False`, `MAX_NEW_TOKENS=64`).
+- `runs/week16_es/{sft_base, rl_base, rl_base_normed_gradients}/` (new artifacts): per-run console.log + `lora_adapter/` (PEFT-format) + `es_history.pkl` + `plots/training_curves.png`. Three runs, ~30 MB on disk total.
+- `src/es_wordle.py` (unchanged in behavior): the existing `_rollout_batched`'s `action_granularity == "char"` branch and the `hasattr(policy, "forward_logits_batch")` gate accommodate the new policy without modification.
+
+### Open Questions
+
+1. **Is `fb%` = 100% an artifact of the parser regex, or a real property of the Wordle-tuned Qwen3 outputs?** A diagnostic counter that disaggregates `fb%` into clean-`<guess>` matches vs fallback-real-word matches vs `XXXXX`-sentinel matches would settle this in one extra iteration.
+2. **Would `N_POP=64`, `N_ITER=100` produce a measurable ES lift?** Salimans et al. used `N_POP` in the thousands. We ran 8 because each iter is hours on Qwen3. A wall-clock-budgeted `N_POP=32`, `N_ITER=30` sanity check is the cheapest experiment that could change the headline answer.
+3. **What is the cold-base ceiling?** Notebook §2.5 prints `SFT_cold ≈ 6%`, `RL_cold ≈ 12%` on the 16-secret slate, but those are noisy. A clean large-`n` eval (full 2,315-secret pool, multiple seeds, deterministic) of `…-Wordle-SFT` and `…-Wordle-RL` cold (no LoRA) is the one missing number that would let `ES contribution` go from `n/a` to a real subtraction.
+
+### Time Spent
+
+- ES production runs (3× ~6-8 GPU-hours): ~24 GPU-hours
+- Format/parser probe + cold-base eval: ~2 GPU-hours
+- New code (`wordle_qwen_policy.py`, `run_week16_es.py`, two notebooks): ~12 hours
+- Documentation (this entry, week 16 report, week 16 critique): ~4 hours
+- **Total: ~30 hours of human time, ~26 GPU-hours of compute**
+
+### LLM Usage Log
+
+- **Claude (May 8-12):** Designed the layered `_parse_word_from_text` fallback (the `_THINK_*` strip + `_FALLBACK_SKIP` denylist for common reasoning 5-grams), wrote the `forward_logits_batch` zeros stub explanation, debugged the `enable_thinking` chat-template TypeError fallback. ~5 hours across the policy implementation and the Week 16 report/critique drafts.
+- **Cursor AI (May 8-12):** Most edits in `src/wordle_qwen_policy.py` and `scripts/run_week16_es.py`; LoRA-cast-to-fp32 wiring, ALPHA probe / RNG snapshot/restore boilerplate, `--artifacts-dir` plumbing. ~6 hours.
+- **ChatGPT (May 9):** Sanity check on the `‖θ − θ₀‖` arithmetic for the normalized-gradient ablation (Run 3); ~20 min.
+
+---
+
+## Week 14 (April 24 - April 30, 2026)
+
+### Overview
+Retired the Gemma 3 1B IT pipeline that ran from Weeks 10-12 and swapped the LM stack to **Qwen3 1.7B base** with **autoregressive 5-letter character generation under a vocabulary trie mask** (`ACTION_GRANULARITY="char"`). Motivation: Week 12 Session 8's PASS-A result (`+22pp` at vocab=16, mini-batch CRN, quartered ALPHA) had not generalized past a single curriculum stage, and the architecture+representation swap was an attempt to widen the operating window. Headline result: **the `qwen_full` configuration FAIL on the pre-registered rubric** at every stage tried (`VOCAB_SCHEDULE=[16, 32, 64]` planned, killed after stage 2). The most informative diagnostic was the new `fb%` (trie fallback rate) column staying at 60-90% across both stages — meaning the trie mask was doing all the structural work and the LM's pre-mask distribution was approximately uninformative for ES.
+
+### Key Decisions
+
+**1. Backbone Swap: Gemma 3 1B IT → Qwen3 1.7B**
+- **Decision:** `MODEL_NAME = "Qwen/Qwen3-1.7B"` for `RUN_PROFILE="qwen_full"`. Smoke profile stays on `distilgpt2`.
+- **Rationale:** Two motivations stacked. (a) Architectural prior — Qwen3 1.7B's English short-form prior reads stronger than Gemma 3 1B IT's in qualitative spot-checks of zero-shot Wordle prompts. (b) Newer base; better chance the Wordle-specific Qwen3 derivatives released by Prime Intellect (tracked since Week 13 as a candidate Week 16 pivot) become available before the project ends.
+- **Compatibility:** Qwen3 needs `transformers>=4.51.0` and `jinja2>=3.1.0` for its chat template. Both were already in `requirements.txt` from Week 12's PEFT bump.
+
+**2. Action Representation: Single-Softmax Word Head → Char-Mode + Trie Mask**
+- **Decision:** Add `ACTION_GRANULARITY = "char"` knob to the policy and the ES rollout dispatcher. In char mode, the policy emits five tokens autoregressively, each masked by `_WordleVocabTrie` against the prefix emitted so far so every emission is in-vocabulary by construction.
+- **Rationale:** The single-softmax word head bottlenecks ES gradient information through a logit-vector dimension equal to the active vocabulary size, which Week 12's LoRA-rank sweep was implicitly trying to fix. Char-mode replaces that classifier with the LM's own pretrained head distribution + an external trie-mask postprocessor; the LoRA-controlled gradient surface is the LM's attention modules, not a head whose dimensionality changes per curriculum stage.
+- **Implementation:** `_rollout_batched` in `src/es_wordle.py` already had a `getattr(policy, "action_granularity", "word")` switch (added in Week 12 for the planned char-mode branch); extending it for production was a thin wrapper around `WordleGPT2Policy.sample_words_batch` plus the trie-mask machinery.
+
+**3. New Diagnostics: `fb%` and `trie_steps` in the Verbose Log**
+- **Decision:** Add `trie_stats() -> {trie_steps, trie_fallbacks, trie_fallback_rate}` to the policy class and surface `fb%` (= `trie_fallbacks / trie_steps` per ES iter) and `trie_steps` in `train_es_wordle`'s per-iteration verbose log.
+- **Rationale:** Char-mode introduces a new failure mode the Week 12 logs cannot diagnose: the LM emitting characters that do not extend any legal Wordle prefix, with the trie mask redirecting them. `fb%` is the per-iteration count of those redirections divided by the total mask applications. We pre-registered "if `fb%` is consistently above 50%, the trie mask is dominating the LM and ES has no gradient surface to push against."
+
+**4. Production Config (`RUN_PROFILE="qwen_full"`)**
+- LoRA r=8, α=16, target_modules=`["q_proj","k_proj","v_proj","o_proj"]`, dropout=0.05.
+- ES: `N_POP=32`, `N_ITERATIONS=100/stage`, `n_eval_episodes=32`, `EVAL_EVERY=5`, `eval_n_episodes=16`.
+- Curriculum: `VOCAB_SCHEDULE=[16, 32, 64]` (planned to extend to `128, 256, 512` if stage 1 passed).
+- Warm-start: 400 episodes per stage (proportional to vocab).
+- Global ES: `SIGMA=0.02`, `RANK_FITNESS=True`, `BASELINE_SUBTRACT=True`, `EMA_BETA=0.0`, `WIN_FITNESS_SCALE=8.0`, `RICHER_PROMPT=True`, `FITNESS_OBJECTIVE="win_plus_return"`.
+
+### Results
+
+**Stage 1 — `VOCAB_SCHEDULE=[16]` over 100 ES iterations.**
+- Pre-WS greedy `Success` = 4%; post-WS = 28%; `best_greedy = 34%` at iter 4 (`+6pp` vs post-WS, inside the ~7pp single-slate noise floor); `final_greedy = 22%` at iter 99 (`−6pp`, inside the same band).
+- `dprobe` non-zero on 9/100 iters (= 9%, vs the 25% pre-registered pass floor).
+- `cos(ĝ)` median ≈ 0.00 with a few isolated +0.05 spikes.
+- `‖θ − θ₀‖` grew approximately linearly to 5.1 — the optimizer was *moving*, but not climbing a level set.
+- **`fb%` ranged 60-90%** across the entire run across all population members, including the unperturbed θ₀.
+- **Verdict: FAIL** on all three pass criteria.
+
+**Stage 2 — `VOCAB_SCHEDULE=[32]`, carrying the stage-1 adapter.**
+- Post-WS greedy `Success` dropped to 14% on the new 32-secret slate. ES added essentially nothing on top: 100 iters, `best_greedy = 16%`, `final_greedy = 10%`, `dprobe` non-zero on 6/100 iters.
+- **Verdict: FAIL.** Killed the run after stage 2 instead of running stage 3.
+
+**Mechanistic interpretation of `fb%` = 60-90%.** The LM's pre-mask distribution is putting most probability on letters that do not extend any legal Wordle prefix; the trie mask redirects almost every token to its top legal alternative. The post-mask distribution the policy actually samples from is therefore approximately uniform over each prefix's legal continuations — a uniform-over-legal sampling distribution has almost no LoRA-controlled gradient surface for ES to push against. The policy's behavior is mask-determined, not LM-determined; ES cannot improve a policy whose decisions are made by string-postprocessing.
+
+### Failed Attempts
+
+**1. Treating Char-Mode + Trie Mask as a Tunable**
+- The 60-90% `fb%` is structural: mask vs LM is operating at cross-purposes for a generic LM that was not pretrained on legal-Wordle-prefix emission. No amount of LoRA, ALPHA scheduling, or `n_eval_episodes` is going to change that ratio meaningfully.
+- **Lesson:** If we ever return to char-mode, the right hypothesis to test is not "trie mask vs no mask" but "trie mask vs additive logit *bias* (penalty proportional to how illegal the next character is)" — preserving the LM's pretrained gradient surface against the constraint instead of overwriting it.
+
+**2. No `qwen_probe` Profile**
+- The smoke profile (DistilGPT-2, two ES iters) validated end-to-end plumbing but not "is the experiment going to teach us anything." The Week 12 `PROBE_VOCAB=4` cell played that role for the LoRA sweep; Week 14 had no analogue.
+- Failure mode (flat `dprobe`, persistent `fb%`) was visible inside the first ~5 ES iters but the run was not killed until stage 2 had also failed overnight.
+- **Lesson:** Add a `qwen_probe` profile (`N_POP=8`, `N_ITERATIONS=10`, single stage) that exercises the new diagnostics in under an hour. Done in Week 16 as the §2.5 format/parser probe.
+
+**3. Pre-Registered Pass Criterion Was a Week-12 Carryover**
+- "`best_greedy − post_ws_greedy ≥ +10pp` AND `final_greedy ≥ post_ws_greedy` AND `dprobe` non-zero on ≥ 25% of iters" was tuned for the word-softmax head, where `dprobe` measures whether the perturbed policy's argmax over a 2,315-way classifier moves on the held-out probe. In char-mode, `dprobe` measures whether the masked autoregressive sampler produces a different *5-character word* — a strictly higher-bar event when `fb%` is 60-90%.
+- **Lesson:** The rubric needs to be re-derived whenever the action representation changes, not just when the model changes.
+
+**4. Confounded Two Changes At Once**
+- Swapped the base LM (Gemma → Qwen3) AND the action representation (word-softmax → char-mask) in the same experiment. The FAIL is unattributable: we cannot say whether Qwen3 with the original word-softmax head would have worked, nor whether Gemma with the new char-mode would have worked.
+- Practical reading given the Week 16 plan to skip our own training entirely: low-priority backfill. Cited in the Week 14 critique as a methodology note.
+
+### Code Changes
+
+- `notebooks/week14_wordle_es_lora_run.ipynb` (new): `RUN_PROFILE = {"smoke", "qwen_full"}`, char-mode wiring, `fb%`/`trie_steps` panel additions to the standard Week-12 plot grid.
+- `src/wordle_gpt2_policy.py`: extended for `action_granularity="char"` — added `_WordleVocabTrie` (build per stage), `sample_words_batch` autoregressive char-loop with mask, `trie_stats()`/`reset_trie_stats()` hooks for the verbose log.
+- `src/es_wordle.py`: added the `fb%`/`trie_steps` columns to the verbose-log row builder; the `getattr(policy, "action_granularity", "word")` switch was already present from Week 12 and required no change.
+- Loaded checkpoints: `models/wordle_qwen_es_head.qwen_full.pt` + `models/wordle_qwen_es_history.qwen_full.pkl`.
+
+### Open Questions
+
+1. **Would Qwen3 + char-mode work at the Week-12 Session-8 operating point** (`per_iter_secret_subset_size=4`, quartered ALPHA, `N_ITER=60`)? We did not transfer those Session-8 settings into Week 14; the production config used a fresh ALPHA calibration at iter 0 against the full 16-secret stage-1 pool.
+2. **Is the trie-mask-dominates-LM story specific to Qwen3, or would Gemma + char-mode show the same `fb%` = 60-90%?** Single-axis backfill that would disambiguate Week 14's confound.
+3. **Does the `fb%` story flip if char-mode operates over a per-position legal-character mask at evaluation only** (not during sampling), so the LM samples freely and we read the legal argmax from its post-softmax distribution?
+
+### LLM Usage Log
+
+- **Claude (Apr 24-30):** Char-mode design discussions, the `_WordleVocabTrie` data-structure choice, mechanistic interpretation of `fb%` = 60-90%; ~4 hours.
+- **Cursor AI (Apr 24-30):** Edits to `wordle_gpt2_policy.py` (trie + char-mode sample loop), notebook plumbing, `fb%`/`trie_steps` verbose-log column wiring; ~5 hours.
+- **ChatGPT (Apr 27):** Sanity check that `transformers>=4.51.0` introduced the `Qwen3` model class; ~10 min.
+
+---
+
+## Week 13 (April 20 - April 23, 2026)
+
+### Overview
+Bridge week between Week 12's Session 8 PASS-A result and Week 14's Qwen3 char-mode pivot. No headline experiment — the week was mostly (a) cleanup and persistence of the Session-8 mini-batch-CRN + restore-best plumbing, (b) cataloging the failure modes from the previous five weeks of Gemma + LoRA + warm-start runs, and (c) deciding what to swap next.
+
+### Key Decisions
+
+**1. End-of-Week-12 Decision: Pivot, Don't Re-Tune**
+- **Decision:** Stop adding more iters / shrinking ALPHA / sweeping LoRA rank on the Gemma + word-softmax pipeline. The Session-8 PASS-A at `VOCAB_SCHEDULE=[16]` is the ceiling of what the Week-12 architecture seems to give us, and three weeks of effort to scale past one stage have produced negative results.
+- **Rationale (the falsification log to date):** Week 11 ran the full 8-stage curriculum and got `es_gain ≈ 0` per stage. Week 12 attempts 1-5 isolated estimator/momentum/capacity hypotheses (PGPE-lite, EMA off, LoRA r=8) — all FAIL. Week 12 attempt 6 found `per_iter_secret_subset_size` as a working knob at vocab=16. Week 12 Session 8 confirmed `+22pp` PASS-A under quartered ALPHA. Generalizing past the single 16-secret stage was the next experiment we owe; we did not run it because the marginal cost (full A100 day per stage) was high enough that a parallel "swap the base LM" experiment in Week 14 became more attractive.
+
+**2. Catalog of Candidates for the Week-14 Pivot**
+- `Qwen/Qwen3-1.7B` — newer-than-Gemma 1.7B-param dense LM with `transformers>=4.51.0` chat-template support. Selected.
+- `Qwen/Qwen3-1.7B-Instruct` — instruction-tuned variant. Deferred (not clearly better for Wordle-specific prompts in spot-checks).
+- `meta-llama/Llama-3.2-1B-Instruct` — comparable-size Llama. Deferred (no clear advantage over Qwen3, and the Wordle-specific Qwen3 derivatives at Prime Intellect made the Qwen family the more strategic bet).
+- `microsoft/Phi-4-mini` — too new at the time, peft + chat-template integration not yet exercised in the repo. Deferred.
+
+**3. Target Module Selection for LoRA on Qwen3**
+- **Decision:** `target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]` (attention only, no MLP).
+- **Rationale:** Gemma's working LoRA target set in Week 12 was attention-only at r=2; quadrupling rank to r=8 in Test A did not change the bottleneck. Adding MLP modules would have multiplied trainable parameters by ~3× without a hypothesis that says MLP-rank is the missing capacity. Stayed conservative; revisit after the Qwen3 + char-mode result.
+
+**4. Char-Mode Action-Representation Plan**
+- **Decision:** Build the `ACTION_GRANULARITY="char"` branch of `WordleGPT2Policy` first, then wire it into Week 14's notebook.
+- **Rationale:** The single-softmax word head is the layer the Week-12 LoRA-rank sweep was implicitly trying to fix; replacing it with autoregressive 5-letter generation under a trie mask sidesteps the dimensionality discontinuity per curriculum stage.
+
+### Results
+
+No new experiments — ~3 hours of bookkeeping and ~6 hours of `WordleGPT2Policy` char-mode + trie-mask scaffolding (carried into Week 14).
+
+### Failed Attempts
+
+None worth listing — the week was deliberately not running new experiments, only cleaning up Week 12's Session 8 output and prepping the Week 14 notebook.
+
+### Code Changes
+
+- `src/wordle_gpt2_policy.py`: scaffolded `_WordleVocabTrie` and `action_granularity="char"` branches (no production use until Week 14).
+- `src/es_wordle.py`: small comment cleanup; no behavior change.
+- `notebooks/week12_wordle_es_lora_run.ipynb`: pinned the Session-8 `EXP2_RESTORE_BEST=1`, `EXP2_EVAL_STOCHASTIC_EVERY=1`, `EXP2_ALPHA_SCALE=0.25`, `EXP2_N_ITERATIONS=60` configuration as the documented "known-good" probe configuration in the cell-4 header.
+
+### Open Questions
+
+1. Would the Week-12 Session-8 PASS-A reproduce on Qwen3 with the *same* word-softmax head and `per_iter_secret_subset_size=4`? (We did not check; Week 14 changed the action representation simultaneously.)
+2. Are there published Wordle-specific Qwen3 checkpoints we could use as a Week-16 fallback if Week 14 fails? (Yes — Prime Intellect's *Wordle Verifiers* release: `…-Wordle-SFT` and `…-Wordle-RL`. Cataloged for Week 16.)
+
+### LLM Usage Log
+
+- **Claude (Apr 20-23):** Pivot decision discussion, Qwen3 vs Llama vs Phi candidate evaluation, char-mode action-representation design; ~3 hours.
+- **Cursor AI (Apr 21-23):** `_WordleVocabTrie` scaffolding + Week 12 notebook header pinning; ~2 hours.
+
+---
+
 ## Week 12 (April 10 - April 19, 2026)
 
 ### Overview
@@ -67,7 +300,7 @@ Every stage of the production curriculum was structurally in the "winners are lo
 - `src/es_wordle.py`:
   - Added `baseline_subtract: bool = False` to both `es_gradient_estimate_wordle` and `train_es_wordle` signatures and docstrings
   - Implemented baseline-subtract branch with antithetic-pair difference (when `antithetic=True`) and raw mean-centered fitness (when `antithetic=False`)
-- `notebooks/week12_implementation_LoRARun.ipynb`:
+- `notebooks/week12_wordle_es_lora_run.ipynb`:
   - Cell 4: added `BASELINE_SUBTRACT = True`, set `EMA_BETA = 0.0`, set `LORA_R = 8`, with paragraph-long comments explaining each diagnosis
   - Cell 9 markdown: rewrote probe description to document the signal-density test (Test B)
   - Cell 10 (probe): added `PROBE_VOCAB = 4`, threaded `baseline_subtract` into the probe ES call, added one-shot gradient-norm probe to auto-calibrate `PROBE_ALPHA` for whichever fitness shaping is active
@@ -131,7 +364,7 @@ The pipeline is correct, instrumented, and reproducible. The scientific question
 - `src/wordle_gpt2_policy.py`: extended to load arbitrary HuggingFace causal LMs (`AutoModelForCausalLM`), apply chat templates, and batch-forward via `forward_logits_batch`
 - `src/wordle_gpt2_warmstart.py`: added per-stage warm-start with `feedback_consistent_random=True` random pre-play and a post-WS success ceiling (skip WS if pool already at ≥0.85 greedy success)
 - `src/es_wordle.py`: added `train_curriculum` driver with per-stage warm-start + ES + diagnostics
-- `notebooks/week12_implementation_LoRARun.ipynb`: full pipeline notebook (named "week12" by file path; structurally the Week-11 deliverable)
+- `notebooks/week12_wordle_es_lora_run.ipynb`: full pipeline notebook (named "week12" by file path; structurally the Week-11 deliverable)
 
 ### Open Questions
 1. Is `es_gain ≈ 0` an artifact of the eval-budget design or a real "ES adds nothing" result?
@@ -227,7 +460,7 @@ Graduated from GridWorld to **Wordle** as the next testbed for ES. Built a Gym-s
 - `src/wordle_gpt2_policy.py` (new): linear-head policy over a frozen HuggingFace LM with previous-guess masking and batched forward
 - `src/wordle_gpt2_warmstart.py` (new): supervised warm-start with feedback-consistent random pre-play
 - `src/es_wordle.py` (new): ES gradient estimator + training loop adapted for Wordle (rank-fitness, antithetic, CRN, win-plus-return shaping)
-- `notebooks/week10_implementation.ipynb` (new): smoke-test notebook for the 16-word vocab + distilGPT-2 pipeline
+- `notebooks/week10_wordle_es_distilgpt2.ipynb` (new): smoke-test notebook for the 16-word vocab + distilGPT-2 pipeline
 
 ### Open Questions Heading Into Week 11
 1. Does warm-start memorize the training secret pool, or generalize?
@@ -279,7 +512,7 @@ Implemented rank-1 LoRA for GridWorld ES in LoRA-only mode (base weights frozen)
   - LoRA-only update changes adapters while base params remain unchanged
 
 ### Notebook Deliverable
-- Added `notebooks/week7_implementation.ipynb` following prior-week structure
+- Added `notebooks/week07_gridworld_lora_perturbation.ipynb` following prior-week structure
 - Focus: **GridWorld only**, comparing:
   - Standard ES (`param_mode='all'`)
   - Rank-1 LoRA ES (`param_mode='lora'`)
@@ -300,7 +533,7 @@ Implemented rank-1 LoRA for GridWorld ES in LoRA-only mode (base weights frozen)
   - Added selected-parameter flatten/set utilities
 - `tests/test_basic.py`:
   - Added LoRA behavior and LoRA-only ES regression tests
-- `notebooks/week7_implementation.ipynb`:
+- `notebooks/week07_gridworld_lora_perturbation.ipynb`:
   - New Week 7 experiment notebook
 
 ### Open Questions
@@ -321,7 +554,7 @@ Implemented rank-1 LoRA for GridWorld ES in LoRA-only mode (base weights frozen)
 - Updated Week 7 notebook to train on Week 4-style shaped rewards and match Week 4 ES sampling budget
 
 ### Updates (Feb 25)
-- Added Week 4-style distance-based reward shaping to `notebooks/week7_implementation.ipynb` for **training** (`ShapedRewardEnvComparison`), while keeping **sparse** `GridWorld` for evaluation metrics
+- Added Week 4-style distance-based reward shaping to `notebooks/week07_gridworld_lora_perturbation.ipynb` for **training** (`ShapedRewardEnvComparison`), while keeping **sparse** `GridWorld` for evaluation metrics
 - Matched Week 7 ES sampling budget to Week 4 defaults: **80 iterations, N=50, 5 episodes/perturbation** (kept `sigma=0.10`, `alpha=0.05`, `max_steps=50`)
 - Added `docs/llm_exploration/week7_log.md` to document Week 7 AI-assisted development
 
@@ -335,7 +568,7 @@ Implemented rank-1 LoRA for GridWorld ES in LoRA-only mode (base weights frozen)
   - `fitness_std`
   - `env_interactions`
   - `cumulative_env_interactions`
-- Added adaptation metrics and analysis outputs in `notebooks/week7_implementation.ipynb`:
+- Added adaptation metrics and analysis outputs in `notebooks/week07_gridworld_lora_perturbation.ipynb`:
   - time-to-threshold (`0.6/0.8/0.9`)
   - interactions-to-threshold
   - success AUC
@@ -613,7 +846,7 @@ g- Notebook validation & testing: 4 hours
 - `src/utils.py` — ES Training (`train_es`, `es_gradient_estimate`) + Evaluation (`evaluate_policy`, `plot_training_curves`, `compute_statistics`)
 - `src/ppo_training.py` — PPO pipeline (`RolloutBuffer`, `compute_gae`, `evaluate_policy`, `train_ppo`)
 - `src/__init__.py` — Clean package exports
-- `notebooks/week4_implementation.ipynb` — End-to-end validation
+- `notebooks/week04_gridworld_es_vs_ppo.ipynb` — End-to-end validation
 
 ### LLM Usage Log
 

@@ -1,4 +1,4 @@
-week7_implementation:
+week07_gridworld_lora_perturbation:
     Didn't do any hyperparemeter tuning
     Code doesn't really benefit much from GPU so it's slow (might require big changes)
 

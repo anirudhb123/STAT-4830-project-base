@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Headless runner for ``notebooks/week16_impl.ipynb`` ES training (Qwen + LoRA).
+Headless runner for ``notebooks/week16_wordle_es_qwen.ipynb`` ES training (Qwen + LoRA).
 
 Survives SSH disconnects when launched inside ``tmux``/``screen`` (or ``nohup``),
 unlike a Jupyter kernel that may be tied to the IDE.

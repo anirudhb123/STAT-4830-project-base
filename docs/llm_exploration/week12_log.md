@@ -218,7 +218,7 @@ But before any of that: rerun the *full* pipeline (warm-start + ES + curriculum)
 
 **Cursor AI:**
 - Edits to `src/es_wordle.py` (added `baseline_subtract`)
-- Edits to `notebooks/week12_implementation_LoRARun.ipynb` (cell 4 + probe + production run wiring)
+- Edits to `notebooks/week12_wordle_es_lora_run.ipynb` (cell 4 + probe + production run wiring)
 - New `scripts/run_es_signal_density_probe.py` (CLI runner mirroring the probe cell)
 - ~3 hours of small high-precision edits
 
@@ -303,7 +303,7 @@ EXP2_ALPHA_SCALE=0.25 EXP2_N_ITERATIONS=60 EXP2_RESTORE_BEST=1 \
   2>&1 | tee /tmp/exp2_overshoot.log
 ```
 
-Code changes (3 files, ~190 LoC net): added `restore_best_at_stage_end` and `eval_stochastic_every` kwargs to `train_es_wordle` + `train_curriculum` in `src/es_wordle.py`; wired `EXP2_RESTORE_BEST` / `EXP2_EVAL_STOCHASTIC_EVERY` env vars and a rewritten summary block (final vs best, greedy vs stochastic, best_iter) into `scripts/run_experiment2_minibatch_crn.py`; new `ACTIVE_EXPERIMENT="exp2_overshoot"` selector branch + post-calibration `ALPHA_SCALE` hook + new markdown explainer cell in `notebooks/week12_implementation_LoRARun.ipynb`. Single-stage probe; no changes to fitness shaping, RANK_FITNESS, BASELINE_SUBTRACT, EMA_BETA, LoRA rank, or subset size.
+Code changes (3 files, ~190 LoC net): added `restore_best_at_stage_end` and `eval_stochastic_every` kwargs to `train_es_wordle` + `train_curriculum` in `src/es_wordle.py`; wired `EXP2_RESTORE_BEST` / `EXP2_EVAL_STOCHASTIC_EVERY` env vars and a rewritten summary block (final vs best, greedy vs stochastic, best_iter) into `scripts/run_experiment2_minibatch_crn.py`; new `ACTIVE_EXPERIMENT="exp2_overshoot"` selector branch + post-calibration `ALPHA_SCALE` hook + new markdown explainer cell in `notebooks/week12_wordle_es_lora_run.ipynb`. Single-stage probe; no changes to fitness shaping, RANK_FITNESS, BASELINE_SUBTRACT, EMA_BETA, LoRA rank, or subset size.
 
 ### Per-iter summary (greedy | stochastic, every iter; every 4th row shown)
 

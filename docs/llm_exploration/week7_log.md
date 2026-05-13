@@ -46,7 +46,7 @@ If ES operates over flattened parameters, you need an explicit parameter-selecti
 
 **What I Did:**
 - Implemented rank-1 LoRA in the policy stack and added a LoRA-only parameter iterator.
-- Verified parameter efficiency in `notebooks/week7_implementation.ipynb`:
+- Verified parameter efficiency in `notebooks/week07_gridworld_lora_perturbation.ipynb`:
   - Standard ES search parameters: **8580**
   - LoRA-only (rank-1) ES search parameters: **324**
   - Compression factor in ES search space: **27.48Ã—**
@@ -124,7 +124,7 @@ The â€œdying gradientâ€ was consistent with the algorithm doing exactly what it
 Shaped training + sparse evaluation preserves interpretability while restoring a usable learning signal.
 
 **What I Did:**
-- Added Week 4-style shaping in `notebooks/week7_implementation.ipynb`:
+- Added Week 4-style shaping in `notebooks/week07_gridworld_lora_perturbation.ipynb`:
   - Distance shaping: `reward + 0.2 * (prev_dist - curr_dist) - 0.01`
 - Kept evaluation on the original sparse `GridWorld` env for final metrics (reward/success/steps).
 
@@ -201,7 +201,7 @@ Budget and metric definitions matter as much as code correctness; otherwise itâ€
 3. Adaptation-speed claims are more credible with threshold/interactions/AUC and multi-seed CI curves.
 
 **What I Did:**
-- Updated `notebooks/week7_implementation.ipynb` to run the full transfer experiment with robust logging and export.
+- Updated `notebooks/week07_gridworld_lora_perturbation.ipynb` to run the full transfer experiment with robust logging and export.
 - Updated `src/utils.py` to expose adaptation diagnostics needed for sample-efficiency analysis.
 - Added pretrain failure handling so bad source policies do not silently contaminate adaptation results.
 
@@ -215,7 +215,7 @@ Budget and metric definitions matter as much as code correctness; otherwise itâ€
 > Summarize the new Week 7 adaptation results from `notebooks/results` and discuss what they mean for the final log.
 
 **Response Summary:**
-- Reviewed the exported result tables from `notebooks/week7_implementation.ipynb`:
+- Reviewed the exported result tables from `notebooks/week07_gridworld_lora_perturbation.ipynb`:
   - `es_lora_adaptation_runs.csv`
   - `es_lora_adaptation_summary.csv`
   - `es_lora_adaptation_deltas.csv`

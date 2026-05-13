@@ -10,7 +10,11 @@ Usage:
 """
 
 import sys
-sys.path.insert(0, 'src')
+from pathlib import Path
+
+_SRC = Path(__file__).resolve().parent.parent / 'src'
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 import torch
 import numpy as np
@@ -116,7 +120,7 @@ def main():
     print("=" * 70)
     print("\nYou can now:")
     print("  1. Run full training: python src/train_wordle.py --iterations 100")
-    print("  2. Open notebook: jupyter notebook notebooks/wordle_training.ipynb")
+    print("  2. Open a notebook, e.g.: jupyter notebook notebooks/week06_wordle_es_vs_ppo.ipynb")
     print("  3. Run tests: pytest tests/test_wordle.py -v")
     print("\nTo use Prime Intellect backend:")
     print("  - Install: pip install verifiers>=0.1.9")

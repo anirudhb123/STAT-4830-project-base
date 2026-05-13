@@ -6,7 +6,7 @@
 
 **Why does this problem matter?** In Week 6, an MLP on the fixed embedding with a large vocabulary reached only modest success. A small pretrained language model gives a much stronger starting representation for “what kind of word fits this feedback.” ES remains useful here because we still optimize from **rollout fitness** rather than differentiating through the environment. One practical issue we hit is that **the hidden answer must appear in the policy’s vocabulary**: if the environment draws secrets from a big dataset while the policy only allows a handful of words, many games are unwinnable and both supervised warm-start and ES look like they fail.
 
-**How will we measure success?** We follow the metrics printed by `train_es_wordle` in `notebooks/week10_implementation.ipynb`: periodic evaluation gives **success rate** (fraction of eval episodes solved within six turns), **average reward**, and **average turns**. The logger also reports **ES_win**, the average win rate across the **perturbed** policies evaluated in each ES iteration, plus training diagnostics such as mean fitness, gradient norm, and parameter drift. The notebook plots eval curves on the iterations where evaluation runs and overlays per-iteration training statistics on the full ES horizon.
+**How will we measure success?** We follow the metrics printed by `train_es_wordle` in `notebooks/week10_wordle_es_distilgpt2.ipynb`: periodic evaluation gives **success rate** (fraction of eval episodes solved within six turns), **average reward**, and **average turns**. The logger also reports **ES_win**, the average win rate across the **perturbed** policies evaluated in each ES iteration, plus training diagnostics such as mean fitness, gradient norm, and parameter drift. The notebook plots eval curves on the iterations where evaluation runs and overlays per-iteration training statistics on the full ES horizon.
 
 **Constraints and risks.** Forward passes through DistilGPT-2 dominate runtime; **CPU** training is workable but slow when `N_POP` and the number of ES iterations are large. The default configuration in the notebook uses a **mock** Wordle wrapper and restricts both **secrets** and **legal guesses** to the same **eight** words (`MOCK_WORDLE_TARGETS`), which makes the task easier than Week 6 but gives a clean signal that the pipeline is behaving (when we tried a large verifier vocabulary without aligning secrets to the policy’s action list, we saw little learning even with warm-start). Moving back to the full Prime-style environment while keeping a small action set would require either enlarging the vocabulary to cover dataset targets or restricting which episodes are sampled.
 
@@ -27,7 +27,7 @@ where epsilon_i ~ Normal(0, I)
 
 Here `R` stands in for whatever scalar fitness we assign to each perturbation (mean return, win rate, or **win-plus-return** with a scale on wins). In code, those values are **z-scored or rank-normalized** across the population before they are combined with the noise vectors `epsilon_i`. We can also use a **normalized** parameter update (`normalize_gradient=True` in the notebook).
 
-**Experimental configuration (from `notebooks/week10_implementation.ipynb`).** The hyperparameter cell is the source of truth; the table matches the **mock, `MOCK_ENV=True`** path as of the current notebook.
+**Experimental configuration (from `notebooks/week10_wordle_es_distilgpt2.ipynb`).** The hyperparameter cell is the source of truth; the table matches the **mock, `MOCK_ENV=True`** path as of the current notebook.
 
 
 | Setting | Value (mock `MOCK_ENV=True` in template) |
@@ -47,7 +47,7 @@ Other toggles in the same cell include `MODEL_NAME` (default **distilgpt2**), `U
 
 Code and artifacts:
 
-- `notebooks/week10_implementation.ipynb` (training, plots, optional checkpoint save)
+- `notebooks/week10_wordle_es_distilgpt2.ipynb` (training, plots, optional checkpoint save)
 - `src/wordle_gpt2_policy.py`, `src/wordle_gpt2_warmstart.py`, `src/es_wordle.py`, `src/wordle_env.py`, `src/wordle_hints.py`
 - `models/wordle_gpt2_es_head.ipynb_run.pt` (head weights, word list, and `history` dict)
 

@@ -2,7 +2,7 @@
 """
 Experiment 1 — Closed-loop proof of the bottleneck fix.
 
-Mirror of `notebooks/week12_implementation_LoRARun.ipynb` cells 2 + 4 + 12 with
+Mirror of `notebooks/week12_wordle_es_lora_run.ipynb` cells 2 + 4 + 12 with
 the EXPERIMENT_1_OVERRIDE applied (VOCAB_SCHEDULE=[4], N_ITERATIONS=30). Skips
 the Phase-A probe cell (10). Designed so we can produce the experiment-1
 diagnostics + verdict without depending on an interactive Jupyter kernel.

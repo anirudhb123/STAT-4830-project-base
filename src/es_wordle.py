@@ -282,7 +282,7 @@ def es_gradient_estimate_wordle(
             that subset. Under CRN, every population member then plays the same ``k``
             secrets, so each member sees each subset secret ~``n_eval_episodes / k``
             times in expectation -- this is the "mini-batch ES under CRN" regime that
-            unlocks the signal-density bottleneck identified in week 12 (critiqueWeek12.md
+            unlocks the signal-density bottleneck identified in week 12 (docs/critiques/week12.md
             and docs/llm_exploration/week12_log.md). The env's target pool is restored
             before the function returns, regardless of success. ``None`` (default) keeps
             the env's full target pool for the iteration (legacy behavior). Requires the

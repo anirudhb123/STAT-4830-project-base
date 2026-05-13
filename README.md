@@ -7,7 +7,7 @@ This repository is set up to run on macOS, Linux, and Windows using `uv`.
 From the repository root:
 
 ```bash
-bash script/install.sh
+bash scripts/install.sh
 ```
 
 Activate the virtual environment:
@@ -19,7 +19,7 @@ source .venv/bin/activate
 Run the script:
 
 ```bash
-python script/gd_1d_torch.py
+python scripts/gd_1d_torch.py
 ```
 
 Run tests:
@@ -33,7 +33,7 @@ pytest
 From the repository root:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\script\install.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 ```
 
 Activate the virtual environment:
@@ -45,7 +45,7 @@ Activate the virtual environment:
 Run the script:
 
 ```powershell
-python .\script\gd_1d_torch.py
+python .\scripts\gd_1d_torch.py
 ```
 
 Run tests:
@@ -111,10 +111,14 @@ Never commit tokens, never paste them into Discord/slack as screenshots of termi
 
 ## Python file guide
 
-Top-level scripts:
+`scripts/` (run from the repo root):
 
-- `quickstart_wordle.py`: Quick demo of the Wordle environment + discrete policy (mock mode); runs a short interaction and a full episode without training.
-- `run_wordle_comparison.py`: Runs an end-to-end ES vs PPO comparison on Wordle, saves plots to `figures/` and trained weights to `models/`.
+- `scripts/install.sh` / `scripts/install.ps1`: Bootstraps `uv`, creates `.venv`, installs `requirements.txt`.
+- `scripts/gd_1d_torch.py`: Tiny gradient-descent demo on a 1D quadratic (used by `tests/test_install_and_run.py`).
+- `scripts/quickstart_wordle.py`: Quick demo of the Wordle environment + discrete policy (mock mode); runs a short interaction and a full episode without training.
+- `scripts/run_wordle_comparison.py`: Runs an end-to-end ES vs PPO comparison on Wordle, saves plots to `figures/` and trained weights to `models/`.
+- `scripts/run_es_signal_density_probe.py`, `scripts/run_experiment1_closed_loop.py`, `scripts/run_experiment2_minibatch_crn.py`: Headless mirrors of week-12 LoRA notebook cells used to characterize the ES signal-density bottleneck.
+- `scripts/run_week16_es.py` (+ `run_week16_es_{nohup,tmux,detached}.sh`, `slurm/week16_es.sbatch`): Headless ES (Qwen + LoRA) training driver with disconnect-safe launchers.
 
 `src/` modules:
 

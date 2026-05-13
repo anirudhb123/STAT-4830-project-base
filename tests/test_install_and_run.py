@@ -16,7 +16,7 @@ def test_gd_script_runs_and_creates_figure():
         "Run the installer script first."
     )
 
-    script_path = repo_root / "script" / "gd_1d_torch.py"
+    script_path = repo_root / "scripts" / "gd_1d_torch.py"
     figure_path = repo_root / "figures" / "gd_torch_quadratic_diagnostics.png"
     if figure_path.exists():
         figure_path.unlink()

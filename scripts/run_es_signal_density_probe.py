@@ -2,7 +2,7 @@
 """
 Run the ES-only signal probe with PROBE_VOCAB=4 (signal-density / Test B).
 
-Mirrors `notebooks/week12_implementation_LoRARun.ipynb` probe cell so you can
+Mirrors `notebooks/week12_wordle_es_lora_run.ipynb` probe cell so you can
 execute without Jupyter. From repo root:
 
     python3 scripts/run_es_signal_density_probe.py

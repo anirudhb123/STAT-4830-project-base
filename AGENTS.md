@@ -7,7 +7,7 @@ This guide is for future agents working in this repository on a VM, workstation,
 From the repository root:
 
 ```bash
-bash script/install.sh
+bash scripts/install.sh
 source .venv/bin/activate
 ```
 
@@ -250,6 +250,6 @@ Then restart the notebook kernel before re-running the setup cell.
 ## 9. Project-specific reminders
 
 - The repo quickstart is in `README.md`.
-- The notebook `notebooks/week12_implementation.ipynb` selects CUDA purely through `torch.cuda.is_available()`, so environment correctness matters more than notebook edits.
+- The notebook `notebooks/week12_wordle_es_gemma.ipynb` selects CUDA purely through `torch.cuda.is_available()`, so environment correctness matters more than notebook edits.
 - Prefer environment fixes over patching notebook logic when the GPU is present but initialization fails.
 - If you change the Python environment for notebook work, restart the kernel before re-testing.

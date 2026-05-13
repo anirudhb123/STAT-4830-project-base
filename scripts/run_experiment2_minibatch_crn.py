@@ -28,7 +28,7 @@ Environment overrides (for smoke tests and the pool-size sweep):
     EXP2_ALPHA_SCALE=1.0         # post-calibration multiplier on ALPHA
                                  #   (use 0.25 to quarter ALPHA for the
                                  #   rotating-subset overshoot regime
-                                 #   documented in critiqueWeek12.md)
+                                 #   documented in docs/critiques/week12.md)
     EXP2_N_CAL_PROBES=1          # number of rotated-subset calibration probes.
                                  #   >1 draws N fresh subsets and uses the
                                  #   median ‖ĝ‖ to calibrate ALPHA, which is
@@ -404,7 +404,7 @@ def main() -> None:
     # With ``EXP2_N_CAL_PROBES > 1`` we run the probe multiple times with fresh
     # subset draws per probe and take the *median* ‖ĝ‖. This is the "online
     # recalibration against the expected gradient magnitude across several
-    # rotated subsets" option (a) from critiqueWeek12.md's postscript:
+    # rotated subsets" option (a) from docs/critiques/week12.md's postscript:
     # a one-shot iter-0 calibration implicitly assumes a stationary objective,
     # but with rotating mini-batches the per-iter gradient magnitude varies
     # across subsets, and the iter-0 draw can be systematically low or high.

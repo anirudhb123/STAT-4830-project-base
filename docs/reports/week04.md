@@ -35,7 +35,7 @@ For the PPO baseline, we implemented a standard PPO-Clip algorithm with Generali
 - `src/gridworld.py`: `GridWorld` and `HarderGridWorld` environments, `PolicyNetwork` (state → action probabilities), and `ValueNetwork` (value function approximation)
 - `src/es_gridworld.py`: `es_gradient_estimate` (core ES loop), `train_es` (full training pipeline), `evaluate_policy`, `plot_training_curves`, and `compute_statistics`
 - `src/ppo.py`: `train_ppo` (PPO training loop), `RolloutBuffer`, and GAE computation
-- `notebooks/week4_implementation.ipynb`: Full working comparison
+- `notebooks/week04_gridworld_es_vs_ppo.ipynb`: Full working comparison
 
 The `PolicyNetwork` uses orthogonal weight initialization and supports both stochastic and deterministic action selection. A `get_action_batch` method is included to support the PPO training loop. The `ValueNetwork` shares the same 2-layer MLP architecture and is used for PPO's advantage estimation.
 

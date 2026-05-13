@@ -7,7 +7,7 @@
 
 - Working end-to-end Wordle pipeline: The repo now has an environment wrapper (`src/wordle_env.py`), a discrete vocabulary policy + value net (`src/wordle_networks.py`), ES training (`src/es_wordle.py`), and PPO training utilities (`src/ppo.py`), and the Week 6 notebook runs both methods and produces saved figures/models.
 
-- Transparent reporting of results: `reportWeek6.md` separates (a) post-training evaluation (50 episodes) from (b) training-time logged metrics, and explicitly calls out the large ES vs PPO episode-budget mismatch.
+- Transparent reporting of results: `../reports/week06.md` separates (a) post-training evaluation (50 episodes) from (b) training-time logged metrics, and explicitly calls out the large ES vs PPO episode-budget mismatch.
 
 ### Areas for Improvement
 - **Representation is too weak for Wordle:** The current 64-d embedding is mostly “letter tried/status” and is not position-aware (greens/yellows per slot), which is critical in Wordle. This likely caps achievable success even with good optimization.

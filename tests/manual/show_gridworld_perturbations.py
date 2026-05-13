@@ -2,7 +2,7 @@
 Visual demo of seeded GridWorld obstacle perturbations.
 
 Run:
-    python tests/show_gridworld_perturbations.py
+    python tests/manual/show_gridworld_perturbations.py
 """
 
 import sys
@@ -11,8 +11,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
 
 from gridworld import GridWorld
 

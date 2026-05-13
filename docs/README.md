@@ -14,7 +14,7 @@ docs/
     index.csv
     <topic-named subfolders>
     _history_lora/           # plot frames recovered from older git revisions
-  reports/                   # weekly deliverable reports (week04..week16)
+  reports/                   # weekly reports (week04..week16 markdown) + final_report.pdf
   critiques/                 # weekly self-critiques (week04, week06, week10, week12, week14, week16)
   slides/                    # PDF exports of each draft deck and the lightning talk
   assignments/               # course-provided assignment templates

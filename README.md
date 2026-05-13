@@ -4,7 +4,7 @@ This repository is set up to run on macOS, Linux, and Windows using `uv`.
 
 ## STAT 4830 final project
 
-- **Written report:** [`docs/reports/week16.md`](docs/reports/week16.md) # REPLACE WITH OVERLEAF REPORT WHEN DONE
+- **Written report:** [`docs/reports/final_report.pdf`](docs/reports/final_report.pdf) 
 - **Slides:** [`docs/presentation_slides.md`](docs/presentation_slides.md)
 - **Main reproducible artifact:** [`notebooks/week16_wordle_es_qwen.ipynb`](notebooks/week16_wordle_es_qwen.ipynb)
 - **Script for training from a GPU server (no notebook):** [`scripts/run_week16_es.py`](scripts/run_week16_es.py) — same ES loop as the notebook for long unattended runs.

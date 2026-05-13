@@ -2,6 +2,32 @@
 
 This repository is set up to run on macOS, Linux, and Windows using `uv`.
 
+## STAT 4830 final project
+
+- **Written report:** [`docs/reports/week16.md`](docs/reports/week16.md)
+- **Slides:** [`docs/slides/4830_slides_draft_5.pdf`](docs/slides/4830_slides_draft_5.pdf) (latest numbered export), [`docs/slides/lightning_talk.pdf`](docs/slides/lightning_talk.pdf), and outline/copy deck [`docs/presentation_slides.md`](docs/presentation_slides.md)
+- **Main reproducible artifact:** [`notebooks/week16_wordle_es_qwen.ipynb`](notebooks/week16_wordle_es_qwen.ipynb)
+- **Headless parity:** [`scripts/run_week16_es.py`](scripts/run_week16_es.py) (same ES loop as the notebook; see docstring for `tmux` / `nohup` wrappers)
+
+### Executable demo (notebook / Colab-equivalent)
+
+The graded demo path is **`notebooks/week16_wordle_es_qwen.ipynb`**: register the repo’s `.venv` as a Jupyter kernel (see [`AGENTS.md`](AGENTS.md)), open the notebook, use a **GPU** runtime (`torch.cuda.is_available()` should be `True`), and run cells in order through training and plots. To use **Google Colab**, upload the notebook or open it from a mounted GitHub copy, enable a GPU runtime (**Runtime → Change runtime type**), paste a Hugging Face **read** token when the notebook/environment needs Hub access (`hf auth login` in an initial `!pip` cell works on Colab), and rerun from the top. Full ES training is slow without a decent GPU because of repeated `model.generate` calls.
+
+### Reproducing Week 16 results
+
+1. Follow **macOS/Linux** or **Windows** quickstart below (`bash scripts/install.sh` / `install.ps1`, then activate `.venv`).
+2. Install/upgrade tooling the notebook relies on if missing: **`jinja2>=3.1.0`** for Qwen chat templates (`python -m pip install -U "jinja2>=3.1.0"`). Optional: `peft`, `ipykernel`.
+3. **Hugging Face:** complete the **[Hugging Face](#hugging-face-gated-models--login)** steps. For Week 16, accept access on the Hub for the checkpoints you actually load (typically **`PrimeIntellect/Qwen3-1.7B-Wordle-SFT`** and **`PrimeIntellect/Qwen3-1.7B-Wordle-RL`**, and any base routing checkpoint such as **`Qwen/Qwen3-1.7B`** if `from_pretrained` pulls it—use the exact IDs from notebook section 2 / the report). Downloads fail with **403** if the license step was skipped on the logged-in account.
+4. Run **`notebooks/week16_wordle_es_qwen.ipynb`** from top to bottom in that environment.
+5. **Optional headless run** (mirrors the notebook driver; edit `MODEL_ES_BASE`, `NORMALIZE_GRADIENT`, and related constants in [`scripts/run_week16_es.py`](scripts/run_week16_es.py) to match the run you want, as in [`docs/reports/week16.md`](docs/reports/week16.md)):
+
+```bash
+mkdir -p logs
+python -u scripts/run_week16_es.py --artifacts-dir runs/week16_es/my_run 2>&1 | tee logs/week16_es.log
+```
+
+Committed example artifacts from the submission runs live under **`runs/week16_es/{sft_base,rl_base,rl_base_normed_gradients}/`**. Additional paths under `runs/week16_es/` may be intentionally gitignored via [`.gitignore`](.gitignore).
+
 ## macOS/Linux quickstart
 
 From the repository root:
@@ -56,12 +82,12 @@ pytest
 
 ## Hugging Face (gated models + login)
 
-Use this when a notebook or script loads weights from the Hub (e.g. **Gemma**). You do **not** put a token in the repo or in a committed `.env` file.
+Use this when a notebook or script loads weights from the Hub (e.g. **Gemma** in older weeks, **`Qwen/Qwen3-*`** and **`PrimeIntellect/Qwen3-1.7B-Wordle-{SFT,RL}`** in Week 16). You do **not** put a token in the repo or in a committed `.env` file.
 
 ### 1. Account and model access
 
 1. Create a [Hugging Face](https://huggingface.co) account (or sign in).
-2. For **gated** models, open that model’s page while logged in (e.g. [google/gemma-3-1b-it](https://huggingface.co/google/gemma-3-1b-it)) and click **Agree and access** (or equivalent). Your account must be allowlisted for that checkpoint or downloads will fail even with a valid token.
+2. For **gated** models, open that model’s page while logged in and click **Agree and access** (or equivalent). Examples: [google/gemma-3-1b-it](https://huggingface.co/google/gemma-3-1b-it), [Qwen/Qwen3-1.7B](https://huggingface.co/Qwen/Qwen3-1.7B), [PrimeIntellect/Qwen3-1.7B-Wordle-SFT](https://huggingface.co/PrimeIntellect/Qwen3-1.7B-Wordle-SFT). Your account must be allowlisted for each checkpoint or downloads will fail even with a valid token.
 
 ### 2. Create an access token
 
@@ -118,7 +144,7 @@ Never commit tokens, never paste them into Discord/slack as screenshots of termi
 - `scripts/quickstart_wordle.py`: Quick demo of the Wordle environment + discrete policy (mock mode); runs a short interaction and a full episode without training.
 - `scripts/run_wordle_comparison.py`: Runs an end-to-end ES vs PPO comparison on Wordle, saves plots to `figures/` and trained weights to `models/`.
 - `scripts/run_es_signal_density_probe.py`, `scripts/run_experiment1_closed_loop.py`, `scripts/run_experiment2_minibatch_crn.py`: Headless mirrors of week-12 LoRA notebook cells used to characterize the ES signal-density bottleneck.
-- `scripts/run_week16_es.py` (+ `run_week16_es_{nohup,tmux,detached}.sh`, `slurm/week16_es.sbatch`): Headless ES (Qwen + LoRA) training driver with disconnect-safe launchers.
+- `scripts/run_week16_es.py` (+ `run_week16_es_{nohup,tmux,detached}.sh`, `scripts/slurm/week16_es.sbatch`): Headless ES (Qwen + LoRA) training driver with disconnect-safe launchers.
 
 `src/` modules:
 
@@ -127,6 +153,7 @@ Never commit tokens, never paste them into Discord/slack as screenshots of termi
 - `src/es_gridworld.py`: ES utilities (noise sampling, score functions, gradient estimation), evaluation helpers, plotting, and comparison-table/statistics helpers.
 - `src/ppo.py`: PPO training loop utilities (rollout buffer, GAE, policy evaluation) with Wordle-specific training support.
 - `src/wordle_env.py`: Wordle environment wrapper (Prime Intellect `verifiers` if installed, otherwise mock fallback) + state embedding + word vocabulary/action mapping.
+- `src/wordle_qwen_policy.py`: Week 16 `WordleQwenPolicy` — LoRA on frozen Qwen3, `model.generate`-based guesses with `<guess>...</guess>` parsing (used by `notebooks/week16_wordle_es_qwen.ipynb` and `scripts/run_week16_es.py`).
 - `src/wordle_networks.py`: Wordle discrete policy/value networks; produces Wordle guesses (optionally XML-formatted for Prime Intellect) from state embeddings.
 - `src/es_wordle.py`: Evolution Strategies training implementation adapted for the Wordle wrapper/policy.
 - `src/train_wordle.py`: CLI entrypoint to train a Wordle agent with PPO; handles args, evaluation, and saving model checkpoints.
